@@ -17,7 +17,8 @@
 		"prepublishOnly": "npm run clean && npm run build"
 	},
 	"dependencies": {
-		"@mariozechner/pi-ai": "^0.59.0"
+		"@mariozechner/pi-ai": "^0.59.0",
+		"@sinclair/typebox": "^0.34.48"
 	},
 	"keywords": [
 		"ai",
