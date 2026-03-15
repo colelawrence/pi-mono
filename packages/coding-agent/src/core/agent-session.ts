@@ -78,6 +78,7 @@ import { getLatestCompactionEntry } from "./session-manager.js";
 import type { SettingsManager } from "./settings-manager.js";
 import { BUILTIN_SLASH_COMMANDS, type SlashCommandInfo, type SlashCommandLocation } from "./slash-commands.js";
 import { buildSystemPrompt } from "./system-prompt.js";
+import { createSessionRuntime, type SessionRuntime } from "./session-runtime.js";
 import type { BashOperations } from "./tools/bash.js";
 import { createAllTools } from "./tools/index.js";
 
@@ -220,9 +221,7 @@ export class AgentSession {
 	// Event subscription state
 	private _unsubscribeAgent?: () => void;
 	private _eventListeners: AgentSessionEventListener[] = [];
-	private _agentEventQueue: Promise<void> = Promise.resolve();
-	/** True when inside the prompt drain loop, so sendCustomMessage can use followUp */
-	private _isInPromptDrainLoop = false;
+	private _runtime: SessionRuntime;
 
 	/** Tracks pending steering messages for UI display. Removed when delivered. */
 	private _steeringMessages: string[] = [];
@@ -239,11 +238,7 @@ export class AgentSession {
 	// Branch summarization state
 	private _branchSummaryAbortController: AbortController | undefined = undefined;
 
-	// Retry state
-	private _retryAbortController: AbortController | undefined = undefined;
-	private _retryAttempt = 0;
-	private _retryPromise: Promise<void> | undefined = undefined;
-	private _retryResolve: (() => void) | undefined = undefined;
+	// Retry state (managed by _runtime)
 
 	// Bash execution state
 	private _bashAbortController: AbortController | undefined = undefined;
@@ -290,9 +285,20 @@ export class AgentSession {
 		this._initialActiveToolNames = config.initialActiveToolNames;
 		this._baseToolsOverride = config.baseToolsOverride;
 
+		this._runtime = createSessionRuntime({
+			processEvent: (event) => this._processAgentEvent(event),
+			isRetryableAgentEnd: (event) => {
+				if (event.type !== "agent_end") return false;
+				const settings = this.settingsManager.getRetrySettings();
+				if (!settings.enabled) return false;
+				const lastAssistant = this._findLastAssistantInMessages(event.messages);
+				return !!lastAssistant && this._isRetryableError(lastAssistant);
+			},
+		});
+
 		// Always subscribe to agent events for internal handling
 		// (session persistence, extensions, auto-compaction, retry logic)
-		this._unsubscribeAgent = this.agent.subscribe(this._handleAgentEvent);
+		this._unsubscribeAgent = this._runtime.subscribeToAgent(this.agent);
 
 		this._buildRuntime({
 			activeToolNames: this._initialActiveToolNames,
@@ -319,43 +325,6 @@ export class AgentSession {
 	// Track last assistant message for auto-compaction check
 	private _lastAssistantMessage: AssistantMessage | undefined = undefined;
 
-	/** Internal handler for agent events - shared by subscribe and reconnect */
-	private _handleAgentEvent = (event: AgentEvent): void => {
-		// Create retry promise synchronously before queueing async processing.
-		// Agent.emit() calls this handler synchronously, and prompt() calls waitForRetry()
-		// as soon as agent.prompt() resolves. If _retryPromise is created only inside
-		// _processAgentEvent, slow earlier queued events can delay agent_end processing
-		// and waitForRetry() can miss the in-flight retry.
-		this._createRetryPromiseForAgentEnd(event);
-
-		this._agentEventQueue = this._agentEventQueue.then(
-			() => this._processAgentEvent(event),
-			() => this._processAgentEvent(event),
-		);
-
-		// Keep queue alive if an event handler fails
-		this._agentEventQueue.catch(() => {});
-	};
-
-	private _createRetryPromiseForAgentEnd(event: AgentEvent): void {
-		if (event.type !== "agent_end" || this._retryPromise) {
-			return;
-		}
-
-		const settings = this.settingsManager.getRetrySettings();
-		if (!settings.enabled) {
-			return;
-		}
-
-		const lastAssistant = this._findLastAssistantInMessages(event.messages);
-		if (!lastAssistant || !this._isRetryableError(lastAssistant)) {
-			return;
-		}
-
-		this._retryPromise = new Promise((resolve) => {
-			this._retryResolve = resolve;
-		});
-	}
 
 	private _findLastAssistantInMessages(messages: AgentMessage[]): AssistantMessage | undefined {
 		for (let i = messages.length - 1; i >= 0; i--) {
@@ -426,14 +395,13 @@ export class AgentSession {
 
 				// Reset retry counter immediately on successful assistant response
 				// This prevents accumulation across multiple LLM calls within a turn
-				if (assistantMsg.stopReason !== "error" && this._retryAttempt > 0) {
+				if (assistantMsg.stopReason !== "error" && this._runtime.getRetryAttempt() > 0) {
+					const { previousAttempt } = this._runtime.resetRetryOnSuccess();
 					this._emit({
 						type: "auto_retry_end",
 						success: true,
-						attempt: this._retryAttempt,
+						attempt: previousAttempt,
 					});
-					this._retryAttempt = 0;
-					this._resolveRetry();
 				}
 			}
 		}
@@ -450,15 +418,6 @@ export class AgentSession {
 			}
 
 			await this._checkCompaction(msg);
-		}
-	}
-
-	/** Resolve the pending retry promise */
-	private _resolveRetry(): void {
-		if (this._retryResolve) {
-			this._retryResolve();
-			this._retryResolve = undefined;
-			this._retryPromise = undefined;
 		}
 	}
 
@@ -591,7 +550,7 @@ export class AgentSession {
 	 */
 	private _reconnectToAgent(): void {
 		if (this._unsubscribeAgent) return; // Already connected
-		this._unsubscribeAgent = this.agent.subscribe(this._handleAgentEvent);
+		this._unsubscribeAgent = this._runtime.subscribeToAgent(this.agent);
 	}
 
 	/**
@@ -600,6 +559,7 @@ export class AgentSession {
 	 */
 	dispose(): void {
 		this._disconnectFromAgent();
+		this._runtime.dispose();
 		this._eventListeners = [];
 	}
 
@@ -634,7 +594,7 @@ export class AgentSession {
 
 	/** Current retry attempt (0 if not retrying) */
 	get retryAttempt(): number {
-		return this._retryAttempt;
+		return this._runtime.getRetryAttempt();
 	}
 
 	/**
@@ -943,35 +903,16 @@ export class AgentSession {
 		}
 
 		// Set drain flag BEFORE agent.prompt() so extension handlers that fire
-		// during the turn (via _agentEventQueue microtasks) use followUp() instead of
-		// starting fire-and-forget prompt() calls. Must be set here (after command
-		// handling) because command handlers need _isInPromptDrainLoop=false.
-		this._isInPromptDrainLoop = true;
-		try {
-			await this.agent.prompt(messages);
-			// Drain extension event handlers queued via _agentEventQueue.
-			await this._agentEventQueue;
-			// If handlers enqueued follow-up messages, continue the agent loop.
-			// Cap iterations to prevent infinite loops from extensions that
-			// unconditionally re-enqueue on every agent_end.
-			let drainCount = 0;
-			while (this.agent.hasQueuedMessages() && drainCount++ < 50) {
-				// Respect abort: don't start a new turn if the user cancelled.
-				const lastMsg = this.agent.state.messages[this.agent.state.messages.length - 1];
-				if (
-					lastMsg?.role === "assistant" &&
-					((lastMsg as AssistantMessage).stopReason === "aborted" ||
-						(lastMsg as AssistantMessage).stopReason === "error")
-				) {
-					break;
-				}
-				await this.agent.continue();
-				await this._agentEventQueue;
-			}
-		} finally {
-			this._isInPromptDrainLoop = false;
-		}
-		await this.waitForRetry();
+		// during the turn use followUp() instead of starting fire-and-forget prompt() calls.
+		// Must be set here (after command handling) because command handlers need isInPromptDrainLoop=false.
+		const isAbortedOrError = (msg: AgentMessage | undefined) => {
+			if (!msg) return false;
+			return (
+				msg.role === "assistant" &&
+				((msg as AssistantMessage).stopReason === "aborted" || (msg as AssistantMessage).stopReason === "error")
+			);
+		};
+		await this._runtime.runPromptCycle(this.agent, messages, isAbortedOrError);
 	}
 
 	/**
@@ -1158,34 +1099,22 @@ export class AgentSession {
 				this.agent.steer(appMessage);
 			}
 		} else if (options?.triggerTurn) {
-			if (this._isInPromptDrainLoop) {
+			if (this._runtime.isInPromptDrainLoop()) {
 				// Inside the prompt drain loop — queue as follow-up.
 				// The drain loop will pick it up via agent.continue().
 				this.agent.followUp(appMessage);
 			} else {
 				// Outside a turn (e.g., from a command handler or cold start).
 				// Start a new turn with its own drain loop.
-				this._isInPromptDrainLoop = true;
-				try {
-					await this.agent.prompt(appMessage);
-					await this._agentEventQueue;
-					let drainCount = 0;
-					while (this.agent.hasQueuedMessages() && drainCount++ < 50) {
-						const lastMsg = this.agent.state.messages[this.agent.state.messages.length - 1];
-						if (
-							lastMsg?.role === "assistant" &&
-							((lastMsg as AssistantMessage).stopReason === "aborted" ||
-								(lastMsg as AssistantMessage).stopReason === "error")
-						) {
-							break;
-						}
-						await this.agent.continue();
-						await this._agentEventQueue;
-					}
-				} finally {
-					this._isInPromptDrainLoop = false;
-				}
-				await this.waitForRetry();
+				const isAbortedOrError = (msg: AgentMessage | undefined) => {
+					if (!msg) return false;
+					return (
+						msg.role === "assistant" &&
+						((msg as AssistantMessage).stopReason === "aborted" ||
+							(msg as AssistantMessage).stopReason === "error")
+					);
+				};
+				await this._runtime.runCustomMessageCycle(this.agent, appMessage, isAbortedOrError);
 			}
 		} else {
 			this.agent.appendMessage(appMessage);
@@ -1277,7 +1206,7 @@ export class AgentSession {
 	 * Abort current operation and wait for agent to become idle.
 	 */
 	async abort(): Promise<void> {
-		this.abortRetry();
+		this._runtime.abortAll();
 		this.agent.abort();
 		await this.agent.waitForIdle();
 	}
@@ -1933,15 +1862,11 @@ export class AgentSession {
 					this.agent.replaceMessages(messages.slice(0, -1));
 				}
 
-				setTimeout(() => {
-					this.agent.continue().catch(() => {});
-				}, 100);
+				this._runtime.scheduleContinuation(this.agent, 100);
 			} else if (this.agent.hasQueuedMessages()) {
 				// Auto-compaction can complete while follow-up/steering/custom messages are waiting.
 				// Kick the loop so queued messages are actually delivered.
-				setTimeout(() => {
-					this.agent.continue().catch(() => {});
-				}, 100);
+				this._runtime.scheduleContinuation(this.agent, 100);
 			}
 		} catch (error) {
 			const errorMessage = error instanceof Error ? error.message : "compaction failed";
@@ -2334,38 +2259,31 @@ export class AgentSession {
 	private async _handleRetryableError(message: AssistantMessage): Promise<boolean> {
 		const settings = this.settingsManager.getRetrySettings();
 		if (!settings.enabled) {
-			this._resolveRetry();
+			this._runtime.resolveRetry();
 			return false;
 		}
 
-		// Retry promise is created synchronously in _handleAgentEvent for agent_end.
-		// Keep a defensive fallback here in case a future refactor bypasses that path.
-		if (!this._retryPromise) {
-			this._retryPromise = new Promise((resolve) => {
-				this._retryResolve = resolve;
-			});
-		}
+		// Retry Deferred is created synchronously in subscribeToAgent handler for agent_end.
+		// incrementRetry() has a defensive fallback in case that path was bypassed.
+		const attempt = this._runtime.incrementRetry();
 
-		this._retryAttempt++;
-
-		if (this._retryAttempt > settings.maxRetries) {
+		if (attempt > settings.maxRetries) {
 			// Max retries exceeded, emit final failure and reset
 			this._emit({
 				type: "auto_retry_end",
 				success: false,
-				attempt: this._retryAttempt - 1,
+				attempt: attempt - 1,
 				finalError: message.errorMessage,
 			});
-			this._retryAttempt = 0;
-			this._resolveRetry(); // Resolve so waitForRetry() completes
+			this._runtime.resolveRetry(); // Resolve so waitForRetry() completes
 			return false;
 		}
 
-		const delayMs = settings.baseDelayMs * 2 ** (this._retryAttempt - 1);
+		const delayMs = settings.baseDelayMs * 2 ** (attempt - 1);
 
 		this._emit({
 			type: "auto_retry_start",
-			attempt: this._retryAttempt,
+			attempt,
 			maxAttempts: settings.maxRetries,
 			delayMs,
 			errorMessage: message.errorMessage || "Unknown error",
@@ -2378,31 +2296,23 @@ export class AgentSession {
 		}
 
 		// Wait with exponential backoff (abortable)
-		this._retryAbortController = new AbortController();
+		const retryAbortController = new AbortController();
 		try {
-			await sleep(delayMs, this._retryAbortController.signal);
+			await sleep(delayMs, retryAbortController.signal);
 		} catch {
 			// Aborted during sleep - emit end event so UI can clean up
-			const attempt = this._retryAttempt;
-			this._retryAttempt = 0;
-			this._retryAbortController = undefined;
 			this._emit({
 				type: "auto_retry_end",
 				success: false,
 				attempt,
 				finalError: "Retry cancelled",
 			});
-			this._resolveRetry();
+			this._runtime.resolveRetry();
 			return false;
 		}
-		this._retryAbortController = undefined;
 
-		// Retry via continue() - use setTimeout to break out of event handler chain
-		setTimeout(() => {
-			this.agent.continue().catch(() => {
-				// Retry failed - will be caught by next agent_end
-			});
-		}, 0);
+		// Retry via continue() - use scheduleContinuation to break out of event handler chain
+		this._runtime.scheduleContinuation(this.agent, 0);
 
 		return true;
 	}
@@ -2411,9 +2321,7 @@ export class AgentSession {
 	 * Cancel in-progress retry.
 	 */
 	abortRetry(): void {
-		this._retryAbortController?.abort();
-		// Note: _retryAttempt is reset in the catch block of _autoRetry
-		this._resolveRetry();
+		this._runtime.abortRetry();
 	}
 
 	/**
@@ -2421,14 +2329,12 @@ export class AgentSession {
 	 * Returns immediately if no retry is in progress.
 	 */
 	private async waitForRetry(): Promise<void> {
-		if (this._retryPromise) {
-			await this._retryPromise;
-		}
+		return this._runtime.waitForRetry();
 	}
 
 	/** Whether auto-retry is currently in progress */
 	get isRetrying(): boolean {
-		return this._retryPromise !== undefined;
+		return this._runtime.isRetrying();
 	}
 
 	/** Whether auto-retry is enabled */
