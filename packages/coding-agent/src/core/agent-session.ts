@@ -72,6 +72,7 @@ import { BUILTIN_SLASH_COMMANDS, type SlashCommandInfo, type SlashCommandLocatio
 import { buildSystemPrompt } from "./system-prompt.js"
 import { createSessionRuntime, type SessionRuntime } from "./session-runtime.js"
 import { Layer, ManagedRuntime } from "effect"
+import { makeOtelBridgeTracer } from "./otel-bridge-tracer.js"
 import type { BashOperations } from "./tools/bash.js"
 import { createAllTools } from "./tools/index.js"
 
@@ -2233,8 +2234,12 @@ export class AgentSession {
       this._bindExtensionCore(this._extensionRunner)
       this._applyExtensionBindings(this._extensionRunner)
       // Expose epi's session runtime to extensions via ExtensionContext.
-      // Layer.empty for now (no services); later we'll add Tracer + session services.
-      const epiRuntime = ManagedRuntime.make(Layer.empty)
+      // Wire the OTEL bridge tracer so Effect spans (Effect.withSpan, Effect.fn)
+      // inside extensions are forwarded to telemetry-otel's OTEL SDK.
+      // When telemetry-otel is not loaded, makeOtelBridgeTracer returns noop spans.
+      const sessionId = this.sessionManager.getSessionId()
+      const bridgeTracer = makeOtelBridgeTracer(sessionId)
+      const epiRuntime = ManagedRuntime.make(Layer.setTracer(bridgeTracer))
       this._extensionRunner.setEpiRuntime(epiRuntime)
     }
 
