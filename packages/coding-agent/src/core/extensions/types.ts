@@ -256,6 +256,13 @@ export interface CompactOptions {
 }
 
 /**
+ * When running under epi (Effect-native pi fork), ExtensionContext carries
+ * the session's Effect Runtime via Symbol.for('pi.epi.sessionRuntime.v1').
+ * This enables pi-sdk-effect-adapter to run extension Effects natively
+ * in epi's fiber tree instead of crossing a Promise boundary.
+ */
+
+/**
  * Context passed to extension event handlers.
  */
 export interface ExtensionContext {

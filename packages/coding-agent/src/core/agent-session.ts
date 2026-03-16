@@ -71,6 +71,7 @@ import type { SettingsManager } from "./settings-manager.js"
 import { BUILTIN_SLASH_COMMANDS, type SlashCommandInfo, type SlashCommandLocation } from "./slash-commands.js"
 import { buildSystemPrompt } from "./system-prompt.js"
 import { createSessionRuntime, type SessionRuntime } from "./session-runtime.js"
+import { Layer, ManagedRuntime } from "effect"
 import type { BashOperations } from "./tools/bash.js"
 import { createAllTools } from "./tools/index.js"
 
@@ -2231,6 +2232,10 @@ export class AgentSession {
     if (this._extensionRunner) {
       this._bindExtensionCore(this._extensionRunner)
       this._applyExtensionBindings(this._extensionRunner)
+      // Expose epi's session runtime to extensions via ExtensionContext.
+      // Layer.empty for now (no services); later we'll add Tracer + session services.
+      const epiRuntime = ManagedRuntime.make(Layer.empty)
+      this._extensionRunner.setEpiRuntime(epiRuntime)
     }
 
     const defaultActiveToolNames = this._baseToolsOverride

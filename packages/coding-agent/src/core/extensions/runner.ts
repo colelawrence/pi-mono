@@ -50,6 +50,10 @@ import type {
 	UserBashEventResult,
 } from "./types.js";
 
+// Symbol used by epi (Effect-native pi fork) to expose the session's Effect Runtime on ExtensionContext.
+// See types.ts for the full usage contract.
+const EPI_RUNTIME_SYMBOL = Symbol.for("pi.epi.sessionRuntime.v1");
+
 // Keybindings for these actions cannot be overridden by extensions
 const RESERVED_ACTIONS_FOR_EXTENSION_CONFLICTS: ReadonlyArray<KeyAction> = [
 	"interrupt",
@@ -219,6 +223,7 @@ export class ExtensionRunner {
 	private shutdownHandler: ShutdownHandler = () => {};
 	private shortcutDiagnostics: ResourceDiagnostic[] = [];
 	private commandDiagnostics: ResourceDiagnostic[] = [];
+	private _epiRuntime: unknown = undefined;
 
 	constructor(
 		extensions: Extension[],
@@ -233,6 +238,14 @@ export class ExtensionRunner {
 		this.cwd = cwd;
 		this.sessionManager = sessionManager;
 		this.modelRegistry = modelRegistry;
+	}
+
+	/**
+	 * Attach an epi (Effect-native pi fork) session runtime to all future ExtensionContexts.
+	 * Called by AgentSession after the runner is constructed, when running under epi.
+	 */
+	setEpiRuntime(runtime: unknown): void {
+		this._epiRuntime = runtime;
 	}
 
 	bindCore(actions: ExtensionActions, contextActions: ExtensionContextActions): void {
@@ -504,7 +517,7 @@ export class ExtensionRunner {
 	 */
 	createContext(): ExtensionContext {
 		const getModel = this.getModel;
-		return {
+		const ctx: ExtensionContext = {
 			ui: this.uiContext,
 			hasUI: this.hasUI(),
 			cwd: this.cwd,
@@ -521,10 +534,14 @@ export class ExtensionRunner {
 			compact: (options) => this.compactFn(options),
 			getSystemPrompt: () => this.getSystemPromptFn(),
 		};
+		if (this._epiRuntime) {
+			(ctx as any)[EPI_RUNTIME_SYMBOL] = this._epiRuntime;
+		}
+		return ctx;
 	}
 
 	createCommandContext(): ExtensionCommandContext {
-		return {
+		const cmdCtx: ExtensionCommandContext = {
 			...this.createContext(),
 			waitForIdle: () => this.waitForIdleFn(),
 			newSession: (options) => this.newSessionHandler(options),
@@ -533,6 +550,10 @@ export class ExtensionRunner {
 			switchSession: (sessionPath) => this.switchSessionHandler(sessionPath),
 			reload: () => this.reloadHandler(),
 		};
+		if (this._epiRuntime) {
+			(cmdCtx as any)[EPI_RUNTIME_SYMBOL] = this._epiRuntime;
+		}
+		return cmdCtx;
 	}
 
 	private isSessionBeforeEvent(event: RunnerEmitEvent): event is SessionBeforeEvent {
