@@ -121,6 +121,7 @@ function resolveParentContext(
 function makeNoopSpan(
 	name: string,
 	parent: Option.Option<Tracer.AnySpan>,
+	effectContext: Context.Context<never>,
 	startTime: bigint,
 ): Tracer.Span {
 	const spanId = Math.random().toString(36).slice(2, 18).padEnd(16, "0");
@@ -138,7 +139,7 @@ function makeNoopSpan(
 		spanId,
 		traceId,
 		parent,
-		context: Context.empty(),
+		context: effectContext,
 		get status() {
 			return status;
 		},
@@ -166,6 +167,7 @@ function makeOtelBackedSpan(
 	name: string,
 	otelSpan: OtelApi.Span,
 	parent: Option.Option<Tracer.AnySpan>,
+	effectContext: Context.Context<never>,
 	startTime: bigint,
 	kind: Tracer.SpanKind,
 ): Tracer.Span {
@@ -179,7 +181,7 @@ function makeOtelBackedSpan(
 		spanId: otelCtx.spanId,
 		traceId: otelCtx.traceId,
 		parent,
-		context: Context.empty(),
+		context: effectContext,
 		get status() {
 			return currentStatus;
 		},
@@ -211,8 +213,19 @@ function makeOtelBackedSpan(
 			}
 		},
 		event(evName: string, evTime: bigint, attributes?: Record<string, unknown>): void {
-			const otelAttrs: OtelApi.Attributes | undefined = attributes as OtelApi.Attributes | undefined;
-			otelSpan.addEvent(evName, otelAttrs, bigintNsToHrTime(evTime));
+			if (attributes) {
+				const otelAttrs: Record<string, string | number | boolean> = {};
+				for (const [k, v] of Object.entries(attributes)) {
+					if (typeof v === "string" || typeof v === "number" || typeof v === "boolean") {
+						otelAttrs[k] = v;
+					} else {
+						otelAttrs[k] = String(v);
+					}
+				}
+				otelSpan.addEvent(evName, otelAttrs, bigintNsToHrTime(evTime));
+			} else {
+				otelSpan.addEvent(evName, undefined, bigintNsToHrTime(evTime));
+			}
 		},
 		addLinks(_links: ReadonlyArray<Tracer.SpanLink>): void {
 			// OTEL links must be set at span creation; post-creation add is not supported.
@@ -232,11 +245,11 @@ function makeOtelBackedSpan(
  */
 export function makeOtelBridgeTracer(sessionId: string): Tracer.Tracer {
 	return Tracer.make({
-		span(name, parent, _context, _links, startTime, kind) {
+		span(name, parent, effectContext, _links, startTime, kind) {
 			const otelTracer = getOtelTracer(sessionId);
 
 			if (!otelTracer) {
-				return makeNoopSpan(name, parent, startTime);
+				return makeNoopSpan(name, parent, effectContext, startTime);
 			}
 
 			const parentContext = resolveParentContext(parent, sessionId);
@@ -249,7 +262,7 @@ export function makeOtelBridgeTracer(sessionId: string): Tracer.Tracer {
 				parentContext,
 			);
 
-			return makeOtelBackedSpan(name, otelSpan, parent, startTime, kind);
+			return makeOtelBackedSpan(name, otelSpan, parent, effectContext, startTime, kind);
 		},
 
 		context<X>(f: () => X): X {
