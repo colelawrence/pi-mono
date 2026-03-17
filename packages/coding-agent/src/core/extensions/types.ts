@@ -255,6 +255,11 @@ export interface CompactOptions {
 	onError?: (error: Error) => void;
 }
 
+export interface HostCapabilities {
+	/** epi exposes a post-turn-ready event after retry / compaction / queued continuation decisions settle. */
+	epiUserTurnReadyV1?: boolean;
+}
+
 /**
  * When running under epi (Effect-native pi fork), ExtensionContext carries
  * the session's Effect Runtime via Symbol.for('pi.epi.sessionRuntime.v1').
@@ -292,6 +297,8 @@ export interface ExtensionContext {
 	compact(options?: CompactOptions): void;
 	/** Get the current effective system prompt. */
 	getSystemPrompt(): string;
+	/** Host/runtime feature flags for capability-gated behavior across Pi variants. */
+	hostCapabilities: HostCapabilities;
 }
 
 /**
@@ -530,6 +537,12 @@ export interface AgentStartEvent {
 export interface AgentEndEvent {
 	type: "agent_end";
 	messages: AgentMessage[];
+}
+
+/** Fired by epi after post-turn retry / compaction / queued continuation checks settle and the host is truly ready for the user again. */
+export interface EpiUserTurnReadyEvent {
+	type: "epi_user_turn_ready";
+	hadCompaction: boolean;
 }
 
 /** Fired at the start of each turn */
@@ -831,6 +844,7 @@ export type ExtensionEvent =
 	| BeforeAgentStartEvent
 	| AgentStartEvent
 	| AgentEndEvent
+	| EpiUserTurnReadyEvent
 	| TurnStartEvent
 	| TurnEndEvent
 	| MessageStartEvent
@@ -985,6 +999,7 @@ export interface ExtensionAPI {
 	on(event: "before_agent_start", handler: ExtensionHandler<BeforeAgentStartEvent, BeforeAgentStartEventResult>): void;
 	on(event: "agent_start", handler: ExtensionHandler<AgentStartEvent>): void;
 	on(event: "agent_end", handler: ExtensionHandler<AgentEndEvent>): void;
+	on(event: "epi_user_turn_ready", handler: ExtensionHandler<EpiUserTurnReadyEvent>): void;
 	on(event: "turn_start", handler: ExtensionHandler<TurnStartEvent>): void;
 	on(event: "turn_end", handler: ExtensionHandler<TurnEndEvent>): void;
 	on(event: "message_start", handler: ExtensionHandler<MessageStartEvent>): void;
@@ -1104,6 +1119,9 @@ export interface ExtensionAPI {
 
 	/** Set thinking level (clamped to model capabilities). */
 	setThinkingLevel(level: ThinkingLevel): void;
+
+	/** Read host/runtime feature flags before subscribing to optional events. */
+	getHostCapabilities(): HostCapabilities;
 
 	// =========================================================================
 	// Provider Registration
@@ -1344,6 +1362,7 @@ export interface ExtensionActions {
 	setModel: SetModelHandler;
 	getThinkingLevel: GetThinkingLevelHandler;
 	setThinkingLevel: SetThinkingLevelHandler;
+	getHostCapabilities: () => HostCapabilities;
 }
 
 /**

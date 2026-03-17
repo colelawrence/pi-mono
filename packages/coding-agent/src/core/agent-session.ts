@@ -36,6 +36,7 @@ import {
 import { DEFAULT_THINKING_LEVEL } from "./defaults.js"
 import { exportSessionToHtml, type ToolHtmlRenderer } from "./export-html/index.js"
 import { createToolHtmlRenderer } from "./export-html/tool-renderer.js"
+import { HOST_CAPABILITIES } from "./extensions/host-capabilities.js"
 import {
   type ContextUsage,
   type ExtensionCommandContextActions,
@@ -73,6 +74,7 @@ import { buildSystemPrompt } from "./system-prompt.js"
 import { createSessionRuntime, type SessionRuntime } from "./session-runtime.js"
 import { Layer, ManagedRuntime } from "effect"
 import { makeOtelBridgeTracer } from "./otel-bridge-tracer.js"
+import { shouldEmitEpiUserTurnReady } from "./user-turn-ready.js"
 import type { BashOperations } from "./tools/bash.js"
 import { createAllTools } from "./tools/index.js"
 
@@ -460,18 +462,43 @@ export class AgentSession {
     }
 
     // Check auto-retry and auto-compaction after agent completes
-    if (event.type === "agent_end" && this._lastAssistantMessage) {
+    if (event.type === "agent_end") {
+      const latestCompactionBefore = getLatestCompactionEntry(this.sessionManager.getBranch())?.timestamp
       const msg = this._lastAssistantMessage
       this._lastAssistantMessage = undefined
 
-      // Check for retryable errors first (overloaded, rate limit, server errors)
-      if (this._isRetryableError(msg)) {
-        const didRetry = await this._handleRetryableError(msg)
-        if (didRetry) return // Retry was initiated, don't proceed to compaction
+      if (msg) {
+        // Check for retryable errors first (overloaded, rate limit, server errors)
+        if (this._isRetryableError(msg)) {
+          const didRetry = await this._handleRetryableError(msg)
+          if (didRetry) return // Retry was initiated, don't proceed to compaction
+        }
+
+        await this._checkCompaction(msg)
       }
 
-      await this._checkCompaction(msg)
+      const latestCompactionAfter = getLatestCompactionEntry(this.sessionManager.getBranch())?.timestamp
+      await this._emitEpiUserTurnReady({ hadCompaction: latestCompactionBefore !== latestCompactionAfter })
     }
+  }
+
+  private async _emitEpiUserTurnReady(input: { hadCompaction: boolean }): Promise<void> {
+    if (!this._extensionRunner) return
+    if (
+      !shouldEmitEpiUserTurnReady({
+        isStreaming: this.isStreaming,
+        hasQueuedMessages: this.agent.hasQueuedMessages(),
+        isCompacting: this.isCompacting,
+        isRetrying: this.isRetrying,
+      })
+    ) {
+      return
+    }
+
+    await this._extensionRunner.emit({
+      type: "epi_user_turn_ready",
+      hadCompaction: input.hadCompaction,
+    })
   }
 
   /** Extract text content from a message */
@@ -2114,6 +2141,7 @@ export class AgentSession {
         },
         getThinkingLevel: () => this.thinkingLevel,
         setThinkingLevel: (level) => this.setThinkingLevel(level),
+        getHostCapabilities: () => HOST_CAPABILITIES,
       },
       {
         getModel: () => this.model,

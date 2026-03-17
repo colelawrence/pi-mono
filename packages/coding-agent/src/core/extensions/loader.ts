@@ -26,6 +26,7 @@ import * as _bundledPiCodingAgent from "../../index.js";
 import { createEventBus, type EventBus } from "../event-bus.js";
 import type { ExecOptions } from "../exec.js";
 import { execCommand } from "../exec.js";
+import { HOST_CAPABILITIES } from "./host-capabilities.js";
 import type {
 	Extension,
 	ExtensionAPI,
@@ -137,6 +138,7 @@ export function createExtensionRuntime(): ExtensionRuntime {
 		setModel: () => Promise.reject(new Error("Extension runtime not initialized")),
 		getThinkingLevel: notInitialized,
 		setThinkingLevel: notInitialized,
+		getHostCapabilities: () => HOST_CAPABILITIES,
 		flagValues: new Map(),
 		pendingProviderRegistrations: [],
 		// Pre-bind: queue registrations so bindCore() can flush them once the
@@ -268,6 +270,10 @@ function createExtensionAPI(
 
 		setThinkingLevel(level) {
 			runtime.setThinkingLevel(level);
+		},
+
+		getHostCapabilities() {
+			return runtime.getHostCapabilities();
 		},
 
 		registerProvider(name: string, config: ProviderConfig) {
