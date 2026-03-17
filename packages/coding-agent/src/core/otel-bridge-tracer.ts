@@ -5,9 +5,10 @@
  * Reads telemetry-otel's registries via Symbol.for (read-only, never writes).
  * When telemetry-otel is not loaded, returns noop spans.
  */
-import type { Exit, Option } from "effect";
-import { Context, Tracer } from "effect";
+
 import * as OtelApi from "@opentelemetry/api";
+import type { Exit, Option } from "effect";
+import { type Context, Tracer } from "effect";
 
 // Symbol.for keys — must match telemetry-otel exactly (read-only consumers)
 const ACTIVE_SPAN_CONTEXT_REGISTRY = Symbol.for("pi.telemetry-otel.activeSpanContextRegistry.v1");
@@ -85,10 +86,7 @@ function bigintNsToHrTime(ns: bigint): OtelApi.HrTime {
  * 2. Fall back to the activeSpanContextRegistry (telemetry-otel's session-level active span).
  * 3. Fall back to OtelApi.context.active() (process-level active context).
  */
-function resolveParentContext(
-	parent: Option.Option<Tracer.AnySpan>,
-	sessionId: string,
-): OtelApi.Context {
+function resolveParentContext(parent: Option.Option<Tracer.AnySpan>, sessionId: string): OtelApi.Context {
 	// Check for an Effect-internal parent with a stashed OTEL span
 	if (parent._tag === "Some") {
 		const parentSpan = parent.value;
@@ -193,8 +191,7 @@ function makeOtelBackedSpan(
 		kind,
 		end(endTime: bigint, exit: Exit.Exit<unknown, unknown>): void {
 			currentStatus = { _tag: "Ended", startTime, endTime, exit };
-			const code =
-				exit._tag === "Failure" ? OtelApi.SpanStatusCode.ERROR : OtelApi.SpanStatusCode.OK;
+			const code = exit._tag === "Failure" ? OtelApi.SpanStatusCode.ERROR : OtelApi.SpanStatusCode.OK;
 			otelSpan.setStatus({ code });
 			otelSpan.end(bigintNsToHrTime(endTime));
 		},
@@ -203,9 +200,7 @@ function makeOtelBackedSpan(
 			if (
 				value !== null &&
 				value !== undefined &&
-				(typeof value === "string" ||
-					typeof value === "number" ||
-					typeof value === "boolean")
+				(typeof value === "string" || typeof value === "number" || typeof value === "boolean")
 			) {
 				otelSpan.setAttribute(key, value);
 			} else {
