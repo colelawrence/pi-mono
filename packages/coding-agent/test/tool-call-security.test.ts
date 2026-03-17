@@ -13,8 +13,8 @@
  * If any of these tests fail after a refactor, the refactor has broken security.
  */
 
-import { describe, expect, it } from "vitest";
 import type { AgentTool } from "@mariozechner/pi-agent-core";
+import { describe, expect, it } from "vitest";
 import type { ExtensionRunner, ToolCallEventResult } from "../src/core/extensions/index.js";
 import { wrapToolWithExtensions } from "../src/core/extensions/wrapper.js";
 
