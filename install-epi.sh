@@ -31,6 +31,23 @@ if [ ! -f "$CLI" ]; then
   exit 1
 fi
 
+# Force the generated CLI to use bun when launched via the global symlink
+python3 - "$CLI" <<'PY'
+from pathlib import Path
+import sys
+
+cli = Path(sys.argv[1])
+text = cli.read_text()
+needle = "#!/usr/bin/env node\n"
+replacement = "#!/usr/bin/env bun\n"
+if text.startswith(needle):
+    cli.write_text(replacement + text[len(needle):])
+elif text.startswith(replacement):
+    pass
+else:
+    raise SystemExit(f"ERROR: unexpected shebang in {cli}")
+PY
+
 # Create the symlink
 mkdir -p "$BUN_BIN"
 ln -sf "$CLI" "$LINK"
