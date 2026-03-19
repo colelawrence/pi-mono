@@ -32,3 +32,65 @@ export function wrapRegisteredTool(registeredTool: RegisteredTool, runner: Exten
 export function wrapRegisteredTools(registeredTools: RegisteredTool[], runner: ExtensionRunner): AgentTool[] {
 	return registeredTools.map((rt) => wrapRegisteredTool(rt, runner));
 }
+
+/**
+ * Wrap a tool with legacy extension interception hooks.
+ *
+ * AgentSession now owns tool_call/tool_result interception via agent-core hooks,
+ * but a small compatibility wrapper remains for tests and direct callers that
+ * need to exercise the security boundary in isolation.
+ */
+export function wrapToolWithExtensions<TParameters extends AgentTool["parameters"], TDetails>(
+	tool: AgentTool<TParameters, TDetails>,
+	runner: Pick<ExtensionRunner, "hasHandlers" | "emitToolCall" | "emitToolResult">,
+): AgentTool<TParameters, TDetails> {
+	return {
+		...tool,
+		execute: async (toolCallId, params, signal, onUpdate) => {
+			if (runner.hasHandlers("tool_call")) {
+				try {
+					const hookResult = await runner.emitToolCall({
+						type: "tool_call",
+						toolName: tool.name,
+						toolCallId,
+						input: params as Record<string, unknown>,
+					});
+
+					if (hookResult?.block) {
+						throw new Error(hookResult.reason || `Tool execution blocked: ${tool.name}`);
+					}
+				} catch (error) {
+					if (error instanceof Error) {
+						throw error;
+					}
+					throw new Error(`Extension failed, blocking execution: ${String(error)}`);
+				}
+			}
+
+			const result = await tool.execute(toolCallId, params, signal, onUpdate);
+
+			if (!runner.hasHandlers("tool_result")) {
+				return result;
+			}
+
+			const hookResult = await runner.emitToolResult({
+				type: "tool_result",
+				toolName: tool.name,
+				toolCallId,
+				input: params as Record<string, unknown>,
+				content: result.content,
+				details: result.details,
+				isError: false,
+			});
+
+			if (!hookResult) {
+				return result;
+			}
+
+			return {
+				content: hookResult.content ?? result.content,
+				details: (hookResult.details ?? result.details) as TDetails,
+			};
+		},
+	};
+}

@@ -14,6 +14,7 @@
  */
 
 import type { AgentTool } from "@mariozechner/pi-agent-core";
+import { Type } from "@sinclair/typebox";
 import { describe, expect, it } from "vitest";
 import type { ExtensionRunner, ToolCallEventResult } from "../src/core/extensions/index.js";
 import { wrapToolWithExtensions } from "../src/core/extensions/wrapper.js";
@@ -42,12 +43,13 @@ function createMockRunner(
 function createMockTool(name: string): AgentTool & { executeCalled: boolean } {
 	const tool = {
 		name,
+		label: name,
 		description: `Test tool: ${name}`,
-		parameters: {},
+		parameters: Type.Object({}),
 		executeCalled: false,
 		execute: async () => {
 			tool.executeCalled = true;
-			return { content: [{ type: "text" as const, text: "executed" }] };
+			return { content: [{ type: "text" as const, text: "executed" }], details: {} };
 		},
 	};
 	return tool;
@@ -62,7 +64,7 @@ describe("tool_call security boundary", () => {
 			},
 		]);
 
-		const wrapped = wrapToolWithExtensions(tool, runner as any);
+		const wrapped = wrapToolWithExtensions(tool, runner);
 
 		await expect(wrapped.execute("call-1", {}, undefined)).rejects.toThrow("BLOCKED by security extension");
 		expect(tool.executeCalled).toBe(false);
@@ -72,7 +74,7 @@ describe("tool_call security boundary", () => {
 		const tool = createMockTool("test_tool");
 		const runner = createMockRunner([async () => ({ block: true, reason: "Dangerous command detected" })]);
 
-		const wrapped = wrapToolWithExtensions(tool, runner as any);
+		const wrapped = wrapToolWithExtensions(tool, runner);
 
 		await expect(wrapped.execute("call-1", {}, undefined)).rejects.toThrow("Dangerous command detected");
 		expect(tool.executeCalled).toBe(false);
@@ -82,7 +84,7 @@ describe("tool_call security boundary", () => {
 		const tool = createMockTool("test_tool");
 		const runner = createMockRunner([async () => undefined]);
 
-		const wrapped = wrapToolWithExtensions(tool, runner as any);
+		const wrapped = wrapToolWithExtensions(tool, runner);
 
 		const result = await wrapped.execute("call-1", {}, undefined);
 		expect(tool.executeCalled).toBe(true);
@@ -103,7 +105,7 @@ describe("tool_call security boundary", () => {
 			},
 		]);
 
-		const wrapped = wrapToolWithExtensions(tool, runner as any);
+		const wrapped = wrapToolWithExtensions(tool, runner);
 
 		await expect(wrapped.execute("call-1", {}, undefined)).rejects.toThrow("First blocker");
 		expect(tool.executeCalled).toBe(false);
@@ -118,7 +120,7 @@ describe("tool_call security boundary", () => {
 			},
 		]);
 
-		const wrapped = wrapToolWithExtensions(tool, runner as any);
+		const wrapped = wrapToolWithExtensions(tool, runner);
 
 		await expect(wrapped.execute("call-1", {}, undefined)).rejects.toThrow(
 			"Extension failed, blocking execution: string error",
@@ -136,7 +138,7 @@ describe("tool_call security boundary", () => {
 			},
 		]);
 
-		const wrapped = wrapToolWithExtensions(tool, runner as any);
+		const wrapped = wrapToolWithExtensions(tool, runner);
 		await wrapped.execute("call-42", { path: "/etc/passwd" }, undefined);
 
 		expect(receivedEvent).toEqual({
@@ -151,7 +153,7 @@ describe("tool_call security boundary", () => {
 		const tool = createMockTool("unguarded_tool");
 		const runner = createMockRunner([]); // No handlers
 
-		const wrapped = wrapToolWithExtensions(tool, runner as any);
+		const wrapped = wrapToolWithExtensions(tool, runner);
 
 		const result = await wrapped.execute("call-1", {}, undefined);
 		expect(tool.executeCalled).toBe(true);
