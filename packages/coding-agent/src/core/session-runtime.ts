@@ -17,29 +17,29 @@
  *   6. Continuation scheduling replaces setTimeout(() => agent.continue().catch({}), N)
  */
 
-import type { Agent, AgentEvent, AgentMessage } from "@mariozechner/pi-agent-core"
+import type { Agent, AgentEvent, AgentMessage } from "@mariozechner/pi-agent-core";
 
 // ============================================================================
 // Phase — replaces boolean _isInPromptDrainLoop + isStreaming checks
 // ============================================================================
 
-export type Phase = "Idle" | "PromptDrainLoop" | "Compacting"
+export type Phase = "Idle" | "PromptDrainLoop" | "Compacting";
 
 // ============================================================================
 // ManualDeferred — synchronous Promise + resolve/reject (used for retry invariant)
 // ============================================================================
 
 interface ManualDeferred {
-  readonly promise: Promise<void>
-  readonly resolve: () => void
+	readonly promise: Promise<void>;
+	readonly resolve: () => void;
 }
 
 function createManualDeferred(): ManualDeferred {
-  let resolve!: () => void
-  const promise = new Promise<void>((r) => {
-    resolve = r
-  })
-  return { promise, resolve }
+	let resolve!: () => void;
+	const promise = new Promise<void>((r) => {
+		resolve = r;
+	});
+	return { promise, resolve };
 }
 
 // ============================================================================
@@ -47,130 +47,130 @@ function createManualDeferred(): ManualDeferred {
 // ============================================================================
 
 export interface RetryState {
-  readonly attempt: number
-  readonly deferred: ManualDeferred | null
-  readonly abortController: AbortController | null
+	readonly attempt: number;
+	readonly deferred: ManualDeferred | null;
+	readonly abortController: AbortController | null;
 }
 
 const initialRetryState: RetryState = {
-  attempt: 0,
-  deferred: null,
-  abortController: null,
-}
+	attempt: 0,
+	deferred: null,
+	abortController: null,
+};
 
 // ============================================================================
 // SessionRuntime — the concurrent kernel
 // ============================================================================
 
 export interface SessionRuntime {
-  /**
-   * Subscribe to agent events. The handler enqueues events for serial processing
-   * and synchronously creates retry Deferred when agent_end contains retryable error.
-   *
-   * Returns unsubscribe function.
-   */
-  readonly subscribeToAgent: (agent: Agent) => () => void
+	/**
+	 * Subscribe to agent events. The handler enqueues events for serial processing
+	 * and synchronously creates retry Deferred when agent_end contains retryable error.
+	 *
+	 * Returns unsubscribe function.
+	 */
+	readonly subscribeToAgent: (agent: Agent) => () => void;
 
-  /**
-   * Run a prompt drain loop: set phase to PromptDrainLoop, await agent.prompt(),
-   * drain event queue, continue while agent has queued messages, then wait for retry.
-   *
-   * This replaces the prompt() concurrent coordination (lines 949-975 of old code).
-   */
-  readonly runPromptCycle: (
-    agent: Agent,
-    messages: AgentMessage[],
-    isAbortedOrError: (msg: AgentMessage | undefined) => boolean,
-  ) => Promise<void>
+	/**
+	 * Run a prompt drain loop: set phase to PromptDrainLoop, await agent.prompt(),
+	 * drain event queue, continue while agent has queued messages, then wait for retry.
+	 *
+	 * This replaces the prompt() concurrent coordination (lines 949-975 of old code).
+	 */
+	readonly runPromptCycle: (
+		agent: Agent,
+		messages: AgentMessage[],
+		isAbortedOrError: (msg: AgentMessage | undefined) => boolean,
+	) => Promise<void>;
 
-  /**
-   * Run a custom-message-triggered drain loop (sendCustomMessage with triggerTurn).
-   * Same structure as runPromptCycle but uses agent.prompt(singleMessage).
-   */
-  readonly runCustomMessageCycle: (
-    agent: Agent,
-    message: AgentMessage,
-    isAbortedOrError: (msg: AgentMessage | undefined) => boolean,
-  ) => Promise<void>
+	/**
+	 * Run a custom-message-triggered drain loop (sendCustomMessage with triggerTurn).
+	 * Same structure as runPromptCycle but uses agent.prompt(singleMessage).
+	 */
+	readonly runCustomMessageCycle: (
+		agent: Agent,
+		message: AgentMessage,
+		isAbortedOrError: (msg: AgentMessage | undefined) => boolean,
+	) => Promise<void>;
 
-  /**
-   * Drain the event queue — waits for all queued event processors to complete.
-   * Equivalent to: await this._agentEventQueue
-   */
-  readonly drainEventQueue: () => Promise<void>
+	/**
+	 * Drain the event queue — waits for all queued event processors to complete.
+	 * Equivalent to: await this._agentEventQueue
+	 */
+	readonly drainEventQueue: () => Promise<void>;
 
-  /**
-   * Check current phase synchronously.
-   */
-  readonly getPhase: () => Phase
+	/**
+	 * Check current phase synchronously.
+	 */
+	readonly getPhase: () => Phase;
 
-  /**
-   * Check if in prompt drain loop (synchronous, for sendCustomMessage routing).
-   */
-  readonly isInPromptDrainLoop: () => boolean
+	/**
+	 * Check if in prompt drain loop (synchronous, for sendCustomMessage routing).
+	 */
+	readonly isInPromptDrainLoop: () => boolean;
 
-  /**
-   * Get current retry attempt count (synchronous).
-   */
-  readonly getRetryAttempt: () => number
+	/**
+	 * Get current retry attempt count (synchronous).
+	 */
+	readonly getRetryAttempt: () => number;
 
-  /**
-   * Check if retry is in progress (synchronous).
-   */
-  readonly isRetrying: () => boolean
+	/**
+	 * Check if retry is in progress (synchronous).
+	 */
+	readonly isRetrying: () => boolean;
 
-  /**
-   * Wait for any pending retry to complete.
-   */
-  readonly waitForRetry: () => Promise<void>
+	/**
+	 * Wait for any pending retry to complete.
+	 */
+	readonly waitForRetry: () => Promise<void>;
 
-  /**
-   * Abort current retry.
-   */
-  readonly abortRetry: () => void
+	/**
+	 * Abort current retry.
+	 */
+	readonly abortRetry: () => void;
 
-  /**
-   * Reset retry state (called on successful response).
-   */
-  readonly resetRetryOnSuccess: () => { previousAttempt: number }
+	/**
+	 * Reset retry state (called on successful response).
+	 */
+	readonly resetRetryOnSuccess: () => { previousAttempt: number };
 
-  /**
-   * Increment retry attempt and set up Deferred if not already set.
-   * Returns current attempt number.
-   */
-  readonly incrementRetry: () => number
+	/**
+	 * Increment retry attempt and set up Deferred if not already set.
+	 * Returns current attempt number.
+	 */
+	readonly incrementRetry: () => number;
 
-  /**
-   * Register the abort controller for the currently sleeping retry backoff.
-   */
-  readonly setRetryAbortController: (abortController: AbortController) => void
+	/**
+	 * Register the abort controller for the currently sleeping retry backoff.
+	 */
+	readonly setRetryAbortController: (abortController: AbortController) => void;
 
-  /**
-   * Clear the abort controller for the currently sleeping retry backoff.
-   * No-op if a newer retry replaced it.
-   */
-  readonly clearRetryAbortController: (abortController: AbortController) => void
+	/**
+	 * Clear the abort controller for the currently sleeping retry backoff.
+	 * No-op if a newer retry replaced it.
+	 */
+	readonly clearRetryAbortController: (abortController: AbortController) => void;
 
-  /**
-   * Resolve the retry Deferred (called when retry completes or is cancelled).
-   */
-  readonly resolveRetry: () => void
+	/**
+	 * Resolve the retry Deferred (called when retry completes or is cancelled).
+	 */
+	readonly resolveRetry: () => void;
 
-  /**
-   * Schedule a continuation (replaces setTimeout(() => agent.continue().catch(() => {}), N)).
-   * The fiber runs detached and is cancelled on abort().
-   */
-  readonly scheduleContinuation: (agent: Agent, delayMs: number) => void
+	/**
+	 * Schedule a continuation (replaces setTimeout(() => agent.continue().catch(() => {}), N)).
+	 * The fiber runs detached and is cancelled on abort().
+	 */
+	readonly scheduleContinuation: (agent: Agent, delayMs: number) => void;
 
-  /**
-   * Abort everything: cancel continuation fibers, abort retry.
-   */
-  readonly abortAll: () => void
+	/**
+	 * Abort everything: cancel continuation fibers, abort retry.
+	 */
+	readonly abortAll: () => void;
 
-  /**
-   * Dispose the runtime (cancel consumer fiber, clean up).
-   */
-  readonly dispose: () => void
+	/**
+	 * Dispose the runtime (cancel consumer fiber, clean up).
+	 */
+	readonly dispose: () => void;
 }
 
 // ============================================================================
@@ -178,211 +178,211 @@ export interface SessionRuntime {
 // ============================================================================
 
 export interface SessionRuntimeDeps {
-  /** Called for each event in serial order */
-  processEvent: (event: AgentEvent) => Promise<void>
-  /** Called synchronously to check if agent_end has retryable error */
-  isRetryableAgentEnd: (event: AgentEvent) => boolean
+	/** Called for each event in serial order */
+	processEvent: (event: AgentEvent) => Promise<void>;
+	/** Called synchronously to check if agent_end has retryable error */
+	isRetryableAgentEnd: (event: AgentEvent) => boolean;
 }
 
 export function createSessionRuntime(deps: SessionRuntimeDeps): SessionRuntime {
-  // --- State ---
-  let phase: Phase = "Idle"
-  let retryState: RetryState = { ...initialRetryState }
+	// --- State ---
+	let phase: Phase = "Idle";
+	let retryState: RetryState = { ...initialRetryState };
 
-  // Event queue: Promise chain for serial processing (same semantics as original)
-  // We use a simple Promise chain here because:
-  // 1. It has the exact same microtask ordering as the original _agentEventQueue.then(...)
-  // 2. The synchronous retry Deferred creation happens BEFORE enqueueing
-  // 3. No Effect runtime overhead for the hot path
-  let eventQueue: Promise<void> = Promise.resolve()
+	// Event queue: Promise chain for serial processing (same semantics as original)
+	// We use a simple Promise chain here because:
+	// 1. It has the exact same microtask ordering as the original _agentEventQueue.then(...)
+	// 2. The synchronous retry Deferred creation happens BEFORE enqueueing
+	// 3. No Effect runtime overhead for the hot path
+	let eventQueue: Promise<void> = Promise.resolve();
 
-  // Continuation fibers (setTimeout replacements)
-  let continuationTimer: ReturnType<typeof setTimeout> | null = null
+	// Continuation fibers (setTimeout replacements)
+	let continuationTimer: ReturnType<typeof setTimeout> | null = null;
 
-  // --- Event subscription ---
-  function subscribeToAgent(agent: Agent): () => void {
-    const handler = (event: AgentEvent): void => {
-      // SYNCHRONOUS: Create retry Deferred before async queue processing
-      // This preserves the invariant that waitForRetry() can see the Deferred
-      // before the queue consumer processes agent_end.
-      if (event.type === "agent_end" && !retryState.deferred) {
-        if (deps.isRetryableAgentEnd(event)) {
-          const deferred = createManualDeferred()
-          retryState = { ...retryState, deferred }
-        }
-      }
+	// --- Event subscription ---
+	function subscribeToAgent(agent: Agent): () => void {
+		const handler = (event: AgentEvent): void => {
+			// SYNCHRONOUS: Create retry Deferred before async queue processing
+			// This preserves the invariant that waitForRetry() can see the Deferred
+			// before the queue consumer processes agent_end.
+			if (event.type === "agent_end" && !retryState.deferred) {
+				if (deps.isRetryableAgentEnd(event)) {
+					const deferred = createManualDeferred();
+					retryState = { ...retryState, deferred };
+				}
+			}
 
-      // Enqueue for serial processing
-      eventQueue = eventQueue.then(
-        () => deps.processEvent(event),
-        () => deps.processEvent(event),
-      )
-      eventQueue.catch(() => {})
-    }
+			// Enqueue for serial processing
+			eventQueue = eventQueue.then(
+				() => deps.processEvent(event),
+				() => deps.processEvent(event),
+			);
+			eventQueue.catch(() => {});
+		};
 
-    return agent.subscribe(handler)
-  }
+		return agent.subscribe(handler);
+	}
 
-  // --- Drain ---
-  async function drainEventQueue(): Promise<void> {
-    await eventQueue
-  }
+	// --- Drain ---
+	async function drainEventQueue(): Promise<void> {
+		await eventQueue;
+	}
 
-  // --- Prompt cycle ---
-  async function runPromptCycle(
-    agent: Agent,
-    messages: AgentMessage[],
-    isAbortedOrError: (msg: AgentMessage | undefined) => boolean,
-  ): Promise<void> {
-    phase = "PromptDrainLoop"
-    try {
-      await agent.prompt(messages)
-      await eventQueue
+	// --- Prompt cycle ---
+	async function runPromptCycle(
+		agent: Agent,
+		messages: AgentMessage[],
+		isAbortedOrError: (msg: AgentMessage | undefined) => boolean,
+	): Promise<void> {
+		phase = "PromptDrainLoop";
+		try {
+			await agent.prompt(messages);
+			await eventQueue;
 
-      let drainCount = 0
-      while (agent.hasQueuedMessages() && drainCount++ < 50) {
-        const lastMsg = agent.state.messages[agent.state.messages.length - 1]
-        if (isAbortedOrError(lastMsg)) break
-        await agent.continue()
-        await eventQueue
-      }
-    } finally {
-      phase = "Idle"
-    }
-    await waitForRetry()
-  }
+			let drainCount = 0;
+			while (agent.hasQueuedMessages() && drainCount++ < 50) {
+				const lastMsg = agent.state.messages[agent.state.messages.length - 1];
+				if (isAbortedOrError(lastMsg)) break;
+				await agent.continue();
+				await eventQueue;
+			}
+		} finally {
+			phase = "Idle";
+		}
+		await waitForRetry();
+	}
 
-  async function runCustomMessageCycle(
-    agent: Agent,
-    message: AgentMessage,
-    isAbortedOrError: (msg: AgentMessage | undefined) => boolean,
-  ): Promise<void> {
-    phase = "PromptDrainLoop"
-    try {
-      await agent.prompt(message)
-      await eventQueue
+	async function runCustomMessageCycle(
+		agent: Agent,
+		message: AgentMessage,
+		isAbortedOrError: (msg: AgentMessage | undefined) => boolean,
+	): Promise<void> {
+		phase = "PromptDrainLoop";
+		try {
+			await agent.prompt(message);
+			await eventQueue;
 
-      let drainCount = 0
-      while (agent.hasQueuedMessages() && drainCount++ < 50) {
-        const lastMsg = agent.state.messages[agent.state.messages.length - 1]
-        if (isAbortedOrError(lastMsg)) break
-        await agent.continue()
-        await eventQueue
-      }
-    } finally {
-      phase = "Idle"
-    }
-    await waitForRetry()
-  }
+			let drainCount = 0;
+			while (agent.hasQueuedMessages() && drainCount++ < 50) {
+				const lastMsg = agent.state.messages[agent.state.messages.length - 1];
+				if (isAbortedOrError(lastMsg)) break;
+				await agent.continue();
+				await eventQueue;
+			}
+		} finally {
+			phase = "Idle";
+		}
+		await waitForRetry();
+	}
 
-  // --- Phase ---
-  function getPhase(): Phase {
-    return phase
-  }
+	// --- Phase ---
+	function getPhase(): Phase {
+		return phase;
+	}
 
-  function isInPromptDrainLoop(): boolean {
-    return phase === "PromptDrainLoop"
-  }
+	function isInPromptDrainLoop(): boolean {
+		return phase === "PromptDrainLoop";
+	}
 
-  // --- Retry ---
-  function getRetryAttempt(): number {
-    return retryState.attempt
-  }
+	// --- Retry ---
+	function getRetryAttempt(): number {
+		return retryState.attempt;
+	}
 
-  function isRetrying(): boolean {
-    return retryState.deferred !== null
-  }
+	function isRetrying(): boolean {
+		return retryState.deferred !== null;
+	}
 
-  async function waitForRetry(): Promise<void> {
-    if (retryState.deferred) {
-      await retryState.deferred.promise
-    }
-  }
+	async function waitForRetry(): Promise<void> {
+		if (retryState.deferred) {
+			await retryState.deferred.promise;
+		}
+	}
 
-  function abortRetry(): void {
-    retryState.abortController?.abort()
-    resolveRetry()
-  }
+	function abortRetry(): void {
+		retryState.abortController?.abort();
+		resolveRetry();
+	}
 
-  function resetRetryOnSuccess(): { previousAttempt: number } {
-    const prev = retryState.attempt
-    retryState = { ...retryState, attempt: 0 }
-    resolveRetry()
-    return { previousAttempt: prev }
-  }
+	function resetRetryOnSuccess(): { previousAttempt: number } {
+		const prev = retryState.attempt;
+		retryState = { ...retryState, attempt: 0 };
+		resolveRetry();
+		return { previousAttempt: prev };
+	}
 
-  function incrementRetry(): number {
-    // Defensive: create Deferred if not already set (in case synchronous creation was bypassed)
-    if (!retryState.deferred) {
-      retryState = { ...retryState, deferred: createManualDeferred() }
-    }
-    const attempt = retryState.attempt + 1
-    retryState = { ...retryState, attempt }
-    return attempt
-  }
+	function incrementRetry(): number {
+		// Defensive: create Deferred if not already set (in case synchronous creation was bypassed)
+		if (!retryState.deferred) {
+			retryState = { ...retryState, deferred: createManualDeferred() };
+		}
+		const attempt = retryState.attempt + 1;
+		retryState = { ...retryState, attempt };
+		return attempt;
+	}
 
-  function setRetryAbortController(abortController: AbortController): void {
-    retryState = { ...retryState, abortController }
-  }
+	function setRetryAbortController(abortController: AbortController): void {
+		retryState = { ...retryState, abortController };
+	}
 
-  function clearRetryAbortController(abortController: AbortController): void {
-    if (retryState.abortController === abortController) {
-      retryState = { ...retryState, abortController: null }
-    }
-  }
+	function clearRetryAbortController(abortController: AbortController): void {
+		if (retryState.abortController === abortController) {
+			retryState = { ...retryState, abortController: null };
+		}
+	}
 
-  function resolveRetry(): void {
-    if (retryState.deferred) {
-      retryState.deferred.resolve()
-      retryState = { ...initialRetryState }
-    }
-  }
+	function resolveRetry(): void {
+		if (retryState.deferred) {
+			retryState.deferred.resolve();
+			retryState = { ...initialRetryState };
+		}
+	}
 
-  // --- Continuation scheduling ---
-  function scheduleContinuation(agent: Agent, delayMs: number): void {
-    cancelContinuation()
-    continuationTimer = setTimeout(() => {
-      continuationTimer = null
-      agent.continue().catch(() => {})
-    }, delayMs)
-  }
+	// --- Continuation scheduling ---
+	function scheduleContinuation(agent: Agent, delayMs: number): void {
+		cancelContinuation();
+		continuationTimer = setTimeout(() => {
+			continuationTimer = null;
+			agent.continue().catch(() => {});
+		}, delayMs);
+	}
 
-  function cancelContinuation(): void {
-    if (continuationTimer !== null) {
-      clearTimeout(continuationTimer)
-      continuationTimer = null
-    }
-  }
+	function cancelContinuation(): void {
+		if (continuationTimer !== null) {
+			clearTimeout(continuationTimer);
+			continuationTimer = null;
+		}
+	}
 
-  // --- Abort ---
-  function abortAll(): void {
-    cancelContinuation()
-    abortRetry()
-  }
+	// --- Abort ---
+	function abortAll(): void {
+		cancelContinuation();
+		abortRetry();
+	}
 
-  // --- Dispose ---
-  function dispose(): void {
-    abortAll()
-  }
+	// --- Dispose ---
+	function dispose(): void {
+		abortAll();
+	}
 
-  return {
-    subscribeToAgent,
-    runPromptCycle,
-    runCustomMessageCycle,
-    drainEventQueue,
-    getPhase,
-    isInPromptDrainLoop,
-    getRetryAttempt,
-    isRetrying,
-    waitForRetry,
-    abortRetry,
-    resetRetryOnSuccess,
-    incrementRetry,
-    setRetryAbortController,
-    clearRetryAbortController,
-    resolveRetry,
-    scheduleContinuation,
-    abortAll,
-    dispose,
-  }
+	return {
+		subscribeToAgent,
+		runPromptCycle,
+		runCustomMessageCycle,
+		drainEventQueue,
+		getPhase,
+		isInPromptDrainLoop,
+		getRetryAttempt,
+		isRetrying,
+		waitForRetry,
+		abortRetry,
+		resetRetryOnSuccess,
+		incrementRetry,
+		setRetryAbortController,
+		clearRetryAbortController,
+		resolveRetry,
+		scheduleContinuation,
+		abortAll,
+		dispose,
+	};
 }
