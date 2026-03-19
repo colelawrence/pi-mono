@@ -1171,6 +1171,7 @@ export class InteractiveMode {
 			cwd: process.cwd(),
 			sessionManager: this.sessionManager,
 			modelRegistry: this.session.modelRegistry,
+			hostCapabilities: extensionRunner.createContext().hostCapabilities,
 			model: this.session.model,
 			isIdle: () => !this.session.isStreaming,
 			abort: () => this.session.abort(),
