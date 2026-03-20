@@ -24,7 +24,7 @@ import type {
 	ThinkingLevel,
 } from "@mariozechner/pi-agent-core";
 import type { AssistantMessage, ImageContent, Message, Model, TextContent } from "@mariozechner/pi-ai";
-import { isContextOverflow, modelsAreEqual, resetApiProviders, supportsXhigh } from "@mariozechner/pi-ai";
+import { isContextOverflow, modelsAreEqual, supportsXhigh } from "@mariozechner/pi-ai";
 import { Layer, ManagedRuntime } from "effect";
 import { getDocsPath } from "../config.js";
 import { theme } from "../modes/interactive/theme/theme.js";
@@ -2299,7 +2299,12 @@ export class AgentSession {
 		const previousFlagValues = this._extensionRunner?.getFlagValues();
 		await this._extensionRunner?.emit({ type: "session_shutdown" });
 		this.settingsManager.reload();
-		resetApiProviders();
+		// Reload persisted credentials before rebuilding provider state so external
+		// auth.json edits are visible to the refreshed model/provider registry.
+		// Interactive /reload already guards against streaming/compaction before
+		// calling into this method, so runtime rebuild happens from an idle state.
+		this._modelRegistry.authStorage.reload();
+		this._modelRegistry.refresh();
 		await this._resourceLoader.reload();
 		this._buildRuntime({
 			activeToolNames: this.getActiveToolNames(),

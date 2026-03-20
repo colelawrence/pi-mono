@@ -7,7 +7,7 @@
  * concurrent kernel (e.g., replacing Promise chains with Effect Queue).
  */
 
-import { existsSync, mkdirSync, rmSync } from "node:fs";
+import { existsSync, mkdirSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { Agent } from "@mariozechner/pi-agent-core";
@@ -323,5 +323,48 @@ describe("AgentSession runtime invariants", () => {
 		await session.prompt("Fresh start");
 
 		expect(callCount).toBe(3);
+	});
+
+	it("reload() picks up auth.json changes", async () => {
+		const model = getModel("anthropic", "claude-sonnet-4-5")!;
+		const authPath = join(tempDir, "auth.json");
+
+		const agent = new Agent({
+			getApiKey: () => "test-key",
+			initialState: { model, systemPrompt: "Test", tools: [] },
+		});
+
+		const sessionManager = SessionManager.inMemory();
+		const settingsManager = SettingsManager.create(tempDir, tempDir);
+		const authStorage = AuthStorage.create(authPath);
+		const modelRegistry = new ModelRegistry(authStorage, tempDir);
+
+		session = new AgentSession({
+			agent,
+			sessionManager,
+			settingsManager,
+			cwd: tempDir,
+			modelRegistry,
+			resourceLoader: createTestResourceLoader(),
+		});
+
+		writeFileSync(
+			authPath,
+			JSON.stringify(
+				{
+					anthropic: {
+						type: "api_key",
+						key: "updated-key",
+					},
+				},
+				null,
+				2,
+			),
+			"utf-8",
+		);
+
+		await session.reload();
+
+		expect(await session.modelRegistry.getApiKeyForProvider("anthropic")).toBe("updated-key");
 	});
 });
