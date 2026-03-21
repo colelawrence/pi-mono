@@ -13,8 +13,8 @@
  * Modes use this class and add their own I/O layer on top.
  */
 
-import { readFileSync } from "node:fs";
-import { basename, dirname, join } from "node:path";
+import { copyFileSync, existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
+import { basename, dirname, join, resolve } from "node:path";
 import type {
 	Agent,
 	AgentEvent,
@@ -76,7 +76,7 @@ import { makeOtelBridgeTracer } from "./otel-bridge-tracer.js";
 import { expandPromptTemplate, type PromptTemplate } from "./prompt-templates.js";
 import type { ResourceExtensionPaths, ResourceLoader } from "./resource-loader.js";
 import type { BranchSummaryEntry, CompactionEntry, SessionManager } from "./session-manager.js";
-import { getLatestCompactionEntry } from "./session-manager.js";
+import { CURRENT_SESSION_VERSION, getLatestCompactionEntry, type SessionHeader } from "./session-manager.js";
 import { createSessionRuntime, type SessionRuntime } from "./session-runtime.js";
 import type { SettingsManager } from "./settings-manager.js";
 import { BUILTIN_SLASH_COMMANDS, type SlashCommandInfo, type SlashCommandLocation } from "./slash-commands.js";
@@ -485,6 +485,7 @@ export class AgentSession {
 			}
 
 			const latestCompactionAfter = getLatestCompactionEntry(this.sessionManager.getBranch())?.timestamp;
+			this._runtime.resolveRetry();
 			await this._emitEpiUserTurnReady({ hadCompaction: latestCompactionBefore !== latestCompactionAfter });
 		}
 	}
@@ -1065,8 +1066,9 @@ export class AgentSession {
 	}
 
 	/**
-	 * Queue a steering message to interrupt the agent mid-run.
-	 * Delivered after current tool execution, skips remaining tools.
+	 * Queue a steering message while the agent is running.
+	 * Delivered after the current assistant turn finishes executing its tool calls,
+	 * before the next LLM call.
 	 * Expands skill commands and prompt templates. Errors on extension commands.
 	 * @param images Optional image attachments to include with the message
 	 * @throws Error if text is an extension command
@@ -2068,6 +2070,20 @@ export class AgentSession {
 			: undefined;
 	}
 
+	private _refreshCurrentModelFromRegistry(): void {
+		const currentModel = this.model;
+		if (!currentModel) {
+			return;
+		}
+
+		const refreshedModel = this._modelRegistry.find(currentModel.provider, currentModel.id);
+		if (!refreshedModel || refreshedModel === currentModel) {
+			return;
+		}
+
+		this.agent.setModel(refreshedModel);
+	}
+
 	private _bindExtensionCore(runner: ExtensionRunner): void {
 		const normalizeLocation = (source: string): SlashCommandLocation | undefined => {
 			if (source === "user" || source === "project" || source === "path") {
@@ -2176,6 +2192,16 @@ export class AgentSession {
 					})();
 				},
 				getSystemPrompt: () => this.systemPrompt,
+			},
+			{
+				registerProvider: (name, config) => {
+					this._modelRegistry.registerProvider(name, config);
+					this._refreshCurrentModelFromRegistry();
+				},
+				unregisterProvider: (name) => {
+					this._modelRegistry.unregisterProvider(name);
+					this._refreshCurrentModelFromRegistry();
+				},
 			},
 		);
 	}
@@ -3043,6 +3069,68 @@ export class AgentSession {
 			themeName,
 			toolRenderer,
 		});
+	}
+
+	/**
+	 * Export the current session branch to a JSONL file.
+	 * Writes the session header followed by all entries on the current branch path.
+	 * @param outputPath Target file path. If omitted, generates a timestamped file in cwd.
+	 * @returns The resolved output file path.
+	 */
+	exportToJsonl(outputPath?: string): string {
+		const filePath = resolve(outputPath ?? `session-${new Date().toISOString().replace(/[:.]/g, "-")}.jsonl`);
+		const dir = dirname(filePath);
+		if (!existsSync(dir)) {
+			mkdirSync(dir, { recursive: true });
+		}
+
+		const header: SessionHeader = {
+			type: "session",
+			version: CURRENT_SESSION_VERSION,
+			id: this.sessionManager.getSessionId(),
+			timestamp: new Date().toISOString(),
+			cwd: this.sessionManager.getCwd(),
+		};
+
+		const branchEntries = this.sessionManager.getBranch();
+		const lines = [JSON.stringify(header)];
+
+		// Re-chain parentIds to form a linear sequence
+		let prevId: string | null = null;
+		for (const entry of branchEntries) {
+			const linear = { ...entry, parentId: prevId };
+			lines.push(JSON.stringify(linear));
+			prevId = entry.id;
+		}
+
+		writeFileSync(filePath, `${lines.join("\n")}\n`);
+		return filePath;
+	}
+
+	/**
+	 * Import a JSONL session file.
+	 * Copies the file into the session directory and switches to it (like /resume).
+	 * @param inputPath Path to the JSONL file to import.
+	 * @returns true if the session was switched successfully.
+	 */
+	async importFromJsonl(inputPath: string): Promise<boolean> {
+		const resolved = resolve(inputPath);
+		if (!existsSync(resolved)) {
+			throw new Error(`File not found: ${resolved}`);
+		}
+
+		// Copy into the session directory so we don't modify the original
+		const sessionDir = this.sessionManager.getSessionDir();
+		if (!existsSync(sessionDir)) {
+			mkdirSync(sessionDir, { recursive: true });
+		}
+		const destPath = join(sessionDir, basename(resolved));
+		// Avoid overwriting if source and destination are the same file
+		if (resolve(destPath) !== resolved) {
+			copyFileSync(resolved, destPath);
+		}
+
+		return this.switchSession(destPath);
 	}
 
 	// =========================================================================

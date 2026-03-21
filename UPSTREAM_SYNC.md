@@ -66,22 +66,6 @@ cd packages/tui
 node --test --import tsx test/tui-render.test.ts
 ```
 
-### `packages/agent/src/proxy.ts`
-Intent:
-- Keep `tsgo` / native TypeScript builds green without broad tsconfig/lib changes.
-
-Resolution pattern:
-- Prefer upstream implementation.
-- If `Response` typing breaks under `tsgo`, use a small local structural response type at the fetch call site.
-- Keep explicit `body` null checks.
-- Avoid repo-wide `lib` or DOM typing changes unless absolutely necessary.
-
-Verification:
-```bash
-cd packages/agent
-npm run build
-```
-
 ## Generated file policy
 
 ### `packages/ai/src/models.generated.ts`
@@ -148,14 +132,18 @@ Whenever upstream absorbs one of our carry patches:
 - note the upstream commit/PR that made the carry patch unnecessary
 
 ## Sync 2026-03-21
-- merged baseline: `upstream/main @ fa877de1`
-- downstream branch: `effect-native-core`
-- local carry patches currently present or expected:
-  - `packages/tui/src/tui.ts` — keep render failures and overwide lines loud but non-fatal
-  - `packages/agent/src/proxy.ts` — local structural response typing for `tsgo` / native TS builds
-- verification used during this round:
+- merged: `upstream/main @ f90647ea`
+- branch: `sync/upstream-2026-03-21`
+- conflicts:
+  - `packages/coding-agent/src/core/agent-session.ts` — kept downstream session-runtime + epi runtime bridge, reapplied upstream session header imports and retry-related fixes
+  - `packages/coding-agent/src/core/extensions/runner.ts` — kept downstream epi runtime injection, adopted upstream keybinding-id reservation and provider bindCore signature
+  - `packages/tui/test/tui-render.test.ts` — kept upstream resize/keybinding test helpers and downstream non-fatal render regression coverage
+  - `packages/agent/package.json`, `packages/coding-agent/package.json`, `package-lock.json` — updated to upstream package versions while preserving downstream-required dependencies (`@sinclair/typebox`, `@opentelemetry/api`)
+- verification:
   - [x] `cd packages/tui && node --test --import tsx test/tui-render.test.ts`
   - [x] `cd packages/agent && npm run build`
   - [x] `./install-epi.sh`
 - notes:
-  - `packages/ai/src/models.generated.ts` may refresh during install/build because it is generated from live provider catalogs; for future syncs, do not hand-merge it — regenerate from the merged branch state and, if kept, commit it separately from sync-resolution commits
+  - current carry patch still expected: `packages/tui/src/tui.ts` — keep render failures and overwide lines loud but non-fatal
+  - `packages/agent/src/proxy.ts` no longer required a downstream carry patch after this sync; `npm run build` passed without local delta
+  - `packages/ai/src/models.generated.ts` was regenerated during verification, but incidental churn should be left out of the sync merge unless intentionally committed as a separate generated refresh

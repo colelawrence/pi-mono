@@ -7,8 +7,9 @@ import type { Tool } from "../src/types.js";
 const mockState = vi.hoisted(() => ({
 	lastParams: undefined as unknown,
 	chunks: undefined as
-		| Array<{
-				choices: Array<{ delta: Record<string, unknown>; finish_reason: string | null }>;
+		| Array<null | {
+				id?: string;
+				choices?: Array<{ delta: Record<string, unknown>; finish_reason: string | null; usage?: unknown }>;
 				usage?: {
 					prompt_tokens: number;
 					completion_tokens: number;
@@ -232,5 +233,79 @@ describe("openai-completions tool_choice", () => {
 
 		expect(response.stopReason).toBe("error");
 		expect(response.errorMessage).toBe("Provider finish_reason: network_error");
+	});
+
+	it("ignores null stream chunks from openai-compatible providers", async () => {
+		mockState.chunks = [
+			null,
+			{
+				id: "chatcmpl-test",
+				choices: [{ delta: { content: "OK" }, finish_reason: null }],
+			},
+			{
+				id: "chatcmpl-test",
+				choices: [{ delta: {}, finish_reason: "stop" }],
+				usage: {
+					prompt_tokens: 3,
+					completion_tokens: 1,
+					prompt_tokens_details: { cached_tokens: 0 },
+					completion_tokens_details: { reasoning_tokens: 0 },
+				},
+			},
+		];
+
+		const { compat: _compat, ...baseModel } = getModel("openai", "gpt-4o-mini")!;
+		const model = { ...baseModel, api: "openai-completions" } as const;
+		const response = await streamSimple(
+			model,
+			{
+				messages: [
+					{
+						role: "user",
+						content: "Reply with exactly OK",
+						timestamp: Date.now(),
+					},
+				],
+			},
+			{ apiKey: "test" },
+		).result();
+
+		expect(response.stopReason).toBe("stop");
+		expect(response.errorMessage).toBeUndefined();
+		expect(response.responseId).toBe("chatcmpl-test");
+		expect(response.usage.totalTokens).toBe(4);
+		expect(response.content).toEqual([{ type: "text", text: "OK" }]);
+	});
+
+	it("uses OpenRouter reasoning object instead of reasoning_effort", async () => {
+		const model = getModel("openrouter", "deepseek/deepseek-r1")!;
+		let payload: unknown;
+
+		await streamSimple(
+			model,
+			{
+				messages: [
+					{
+						role: "user",
+						content: "Hi",
+						timestamp: Date.now(),
+					},
+				],
+			},
+			{
+				apiKey: "test",
+				reasoning: "high",
+				onPayload: (params: unknown) => {
+					payload = params;
+				},
+			},
+		).result();
+
+		const params = (payload ?? mockState.lastParams) as {
+			reasoning?: { effort?: string };
+			reasoning_effort?: string;
+		};
+		expect(params.reasoning).toEqual({ effort: "high" });
+		expect(params.reasoning_effort).toBeUndefined();
 	});
 });
