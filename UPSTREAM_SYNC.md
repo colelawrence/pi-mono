@@ -85,18 +85,23 @@ npm run build
 ## Generated file policy
 
 ### `packages/ai/src/models.generated.ts`
-This file can change when `packages/ai` runs `generate-models` against live provider catalogs.
+This file is generated from live provider catalogs and should be treated as derived output, not hand-merged source.
 
-Guideline:
-- Do not mix model-catalog refreshes into an upstream sync unless the refresh is intentional.
-- Prefer a separate commit titled clearly as a generated-model refresh.
-- If a build step dirties this file unexpectedly, decide explicitly whether to keep or drop that refresh before finishing the sync.
+Rule:
+- Do not resolve this file line-by-line during upstream sync.
+- If it conflicts or becomes dirty during a sync/build, regenerate it from the current branch state and use the regenerated output as the resolution.
+- Keep generated-model refreshes separate from handwritten sync-resolution commits whenever possible.
+- If a sync does not intentionally include a model-catalog refresh, avoid carrying incidental churn in this file.
 
-Verification:
+Recommended conflict workflow:
 ```bash
 cd packages/ai
 npm run generate-models
 ```
+
+Commit policy:
+- Prefer a separate commit titled clearly as a generated-model refresh.
+- Sync commits should mention whether `models.generated.ts` was regenerated intentionally or left unchanged.
 
 ## Suggested sync verification checklist
 
@@ -131,7 +136,8 @@ Append a short entry for each sync:
   - [x] packages/agent npm run build
   - [x] ./install-epi.sh
 - notes:
-  - models.generated.ts intentionally refreshed? yes/no
+  - models.generated.ts regenerated as conflict/build resolution? yes/no
+  - if yes, was it committed as a separate generated refresh? yes/no
 ```
 
 ## Patch retirement rule
@@ -152,4 +158,4 @@ Whenever upstream absorbs one of our carry patches:
   - [x] `cd packages/agent && npm run build`
   - [x] `./install-epi.sh`
 - notes:
-  - `packages/ai/src/models.generated.ts` may refresh during install/build because it is generated from live provider catalogs; commit it only as an explicit generated refresh, separate from sync-resolution commits when possible
+  - `packages/ai/src/models.generated.ts` may refresh during install/build because it is generated from live provider catalogs; for future syncs, do not hand-merge it — regenerate from the merged branch state and, if kept, commit it separately from sync-resolution commits
