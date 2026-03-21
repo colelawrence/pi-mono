@@ -8,7 +8,7 @@ import * as path from "node:path";
 import { isKeyRelease, matchesKey } from "./keys.js";
 import type { Terminal } from "./terminal.js";
 import { getCapabilities, isImageLine, setCellDimensions } from "./terminal-image.js";
-import { extractSegments, sliceByColumn, sliceWithWidth, visibleWidth } from "./utils.js";
+import { extractSegments, sliceByColumn, sliceWithWidth, truncateToWidth, visibleWidth } from "./utils.js";
 
 /**
  * Component interface - all components must implement this
@@ -879,18 +879,48 @@ export class TUI extends Container {
 			return targetScreenRow - currentScreenRow;
 		};
 
-		// Render all components to get new lines
-		let newLines = this.render(width);
+		let newLines: string[];
+		let cursorPos: { row: number; col: number } | null;
+		try {
+			// Render all components to get new lines
+			newLines = this.render(width);
 
-		// Composite overlays into the rendered lines (before differential compare)
-		if (this.overlayStack.length > 0) {
-			newLines = this.compositeOverlays(newLines, width, height);
+			// Composite overlays into the rendered lines (before differential compare)
+			if (this.overlayStack.length > 0) {
+				newLines = this.compositeOverlays(newLines, width, height);
+			}
+
+			// Extract cursor position before applying line resets (marker must be found first)
+			cursorPos = this.extractCursorPosition(newLines, height);
+
+			newLines = this.applyLineResets(newLines);
+		} catch (error) {
+			const crashLogPath = path.join(os.homedir(), ".pi", "agent", "pi-crash.log");
+			const crashData = [
+				`Crash at ${new Date().toISOString()}`,
+				`Terminal width: ${width}`,
+				`Terminal height: ${height}`,
+				"",
+				"=== Error ===",
+				error instanceof Error && error.stack ? error.stack : String(error),
+				"",
+				"=== Previous rendered lines ===",
+				...this.previousLines.map((l, idx) => `[${idx}] (w=${visibleWidth(l)}) ${l}`),
+				"",
+			].join("\n");
+			fs.mkdirSync(path.dirname(crashLogPath), { recursive: true });
+			fs.writeFileSync(crashLogPath, crashData);
+
+			const warning = [
+				`[pi-tui] Recoverable render issue: Render pipeline threw: ${error instanceof Error ? error.message : String(error)}`,
+				"Session kept alive; output was replaced.",
+				`Debug log written to: ${crashLogPath}`,
+			].join("\n");
+			process.stderr.write(`${warning}\n`);
+
+			newLines = [truncateToWidth(`⚠ Render error; see ${crashLogPath}`, width, "…")];
+			cursorPos = null;
 		}
-
-		// Extract cursor position before applying line resets (marker must be found first)
-		const cursorPos = this.extractCursorPosition(newLines, height);
-
-		newLines = this.applyLineResets(newLines);
 
 		// Width or height changed - need full re-render
 		const widthChanged = this.previousWidth !== 0 && this.previousWidth !== width;
@@ -903,7 +933,35 @@ export class TUI extends Container {
 			if (clear) buffer += "\x1b[2J\x1b[H\x1b[3J"; // Clear screen, home, then clear scrollback
 			for (let i = 0; i < newLines.length; i++) {
 				if (i > 0) buffer += "\r\n";
-				buffer += newLines[i];
+				const line = newLines[i];
+				const isImage = isImageLine(line);
+				if (!isImage && visibleWidth(line) > width) {
+					const crashLogPath = path.join(os.homedir(), ".pi", "agent", "pi-crash.log");
+					const crashData = [
+						`Crash at ${new Date().toISOString()}`,
+						`Terminal width: ${width}`,
+						`Line ${i} visible width: ${visibleWidth(line)}`,
+						"",
+						"=== All rendered lines ===",
+						...newLines.map((l, idx) => `[${idx}] (w=${visibleWidth(l)}) ${l}`),
+						"",
+					].join("\n");
+					fs.mkdirSync(path.dirname(crashLogPath), { recursive: true });
+					fs.writeFileSync(crashLogPath, crashData);
+
+					const warning = [
+						`Rendered line ${i} exceeds terminal width (${visibleWidth(line)} > ${width}).`,
+						"",
+						"This is likely caused by a custom TUI component not truncating its output.",
+						"Use visibleWidth() to measure and truncateToWidth() to truncate lines.",
+						"",
+						`Debug log written to: ${crashLogPath}`,
+					].join("\n");
+					process.stderr.write(`${warning}\n`);
+					buffer += truncateToWidth(line, width, "…");
+					continue;
+				}
+				buffer += line;
 			}
 			buffer += "\x1b[?2026l"; // End synchronized output
 			this.terminal.write(buffer);
@@ -1086,10 +1144,7 @@ export class TUI extends Container {
 				fs.mkdirSync(path.dirname(crashLogPath), { recursive: true });
 				fs.writeFileSync(crashLogPath, crashData);
 
-				// Clean up terminal state before throwing
-				this.stop();
-
-				const errorMsg = [
+				const warning = [
 					`Rendered line ${i} exceeds terminal width (${visibleWidth(line)} > ${width}).`,
 					"",
 					"This is likely caused by a custom TUI component not truncating its output.",
@@ -1097,7 +1152,9 @@ export class TUI extends Container {
 					"",
 					`Debug log written to: ${crashLogPath}`,
 				].join("\n");
-				throw new Error(errorMsg);
+				process.stderr.write(`${warning}\n`);
+				buffer += truncateToWidth(line, width, "…");
+				continue;
 			}
 			buffer += line;
 		}

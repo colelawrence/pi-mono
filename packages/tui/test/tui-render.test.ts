@@ -12,6 +12,15 @@ class TestComponent implements Component {
 	invalidate(): void {}
 }
 
+class ThrowingComponent implements Component {
+	shouldThrow = true;
+	render(_width: number): string[] {
+		if (this.shouldThrow) throw new Error("boom");
+		return ["Recovered"];
+	}
+	invalidate(): void {}
+}
+
 function getCellItalic(terminal: VirtualTerminal, row: number, col: number): number {
 	const xterm = (terminal as unknown as { xterm: XtermTerminalType }).xterm;
 	const buffer = xterm.buffer.active;
@@ -178,6 +187,51 @@ describe("TUI differential rendering", () => {
 		const viewport = terminal.getViewport();
 		// Line 1 should show "CHANGED", proving cursor tracking was correct
 		assert.ok(viewport[1]?.includes("CHANGED"), `Expected "CHANGED" on line 1, got: ${viewport[1]}`);
+
+		tui.stop();
+	});
+
+	it("sanitizes overwide lines without killing the session", async () => {
+		const terminal = new VirtualTerminal(10, 4);
+		const tui = new TUI(terminal);
+		const component = new TestComponent();
+		tui.addChild(component);
+
+		component.lines = ["123456789012345"];
+		tui.start();
+		await terminal.flush();
+
+		let viewport = terminal.getViewport();
+		assert.ok(viewport[0]?.includes("123456789…"), `Expected truncated line, got: ${viewport[0]}`);
+
+		component.lines = ["Recovered"];
+		tui.requestRender();
+		await terminal.flush();
+
+		viewport = terminal.getViewport();
+		assert.ok(viewport[0]?.includes("Recovered"), `Expected session to keep rendering, got: ${viewport[0]}`);
+
+		tui.stop();
+	});
+
+	it("replaces thrown render output with a recoverable warning", async () => {
+		const terminal = new VirtualTerminal(30, 4);
+		const tui = new TUI(terminal);
+		const component = new ThrowingComponent();
+		tui.addChild(component);
+
+		tui.start();
+		await terminal.flush();
+
+		let viewport = terminal.getViewport();
+		assert.ok(viewport[0]?.includes("Render error"), `Expected recoverable warning, got: ${viewport[0]}`);
+
+		component.shouldThrow = false;
+		tui.requestRender();
+		await terminal.flush();
+
+		viewport = terminal.getViewport();
+		assert.ok(viewport[0]?.includes("Recovered"), `Expected recovery render, got: ${viewport[0]}`);
 
 		tui.stop();
 	});
