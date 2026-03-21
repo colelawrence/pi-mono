@@ -1,5 +1,9 @@
 # Development Rules
 
+## Upstream Sync
+For keeping this fork aligned with upstream Pi, read `UPSTREAM_SYNC.md` before starting a merge/sync task.
+Update that file after each upstream sync with conflict notes, retained carry patches, and verification steps.
+
 ## First Message
 If the user did not give you a concrete task in their first message,
 read README.md, then ask which module(s) to work on. Based on the answer, read the relevant README.md files in parallel.

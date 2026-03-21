@@ -82,6 +82,21 @@ export interface ProxyStreamOptions extends SimpleStreamOptions {
  * });
  * ```
  */
+type ProxyStreamReader = {
+	read(): Promise<{ done: boolean; value?: Uint8Array }>;
+	cancel(reason?: unknown): Promise<void>;
+};
+
+type ProxyFetchResponse = {
+	ok: boolean;
+	status: number;
+	statusText: string;
+	json(): Promise<unknown>;
+	body: {
+		getReader(): ProxyStreamReader;
+	} | null;
+};
+
 export function streamProxy(model: Model<any>, context: Context, options: ProxyStreamOptions): ProxyMessageEventStream {
 	const stream = new ProxyMessageEventStream();
 
@@ -105,7 +120,7 @@ export function streamProxy(model: Model<any>, context: Context, options: ProxyS
 			timestamp: Date.now(),
 		};
 
-		let reader: ReadableStreamDefaultReader<Uint8Array> | undefined;
+		let reader: ProxyStreamReader | undefined;
 
 		const abortHandler = () => {
 			if (reader) {
@@ -118,7 +133,7 @@ export function streamProxy(model: Model<any>, context: Context, options: ProxyS
 		}
 
 		try {
-			const response = await fetch(`${options.proxyUrl}/api/stream`, {
+			const response = (await fetch(`${options.proxyUrl}/api/stream`, {
 				method: "POST",
 				headers: {
 					Authorization: `Bearer ${options.authToken}`,
@@ -134,13 +149,13 @@ export function streamProxy(model: Model<any>, context: Context, options: ProxyS
 					},
 				}),
 				signal: options.signal,
-			});
+			})) as ProxyFetchResponse;
 
 			if (!response.ok) {
 				let errorMessage = `Proxy error: ${response.status} ${response.statusText}`;
 				try {
-					const errorData = (await response.json()) as { error?: string };
-					if (errorData.error) {
+					const errorData = (await response.json()) as { error?: unknown };
+					if (typeof errorData.error === "string" && errorData.error.length > 0) {
 						errorMessage = `Proxy error: ${errorData.error}`;
 					}
 				} catch {
@@ -149,12 +164,17 @@ export function streamProxy(model: Model<any>, context: Context, options: ProxyS
 				throw new Error(errorMessage);
 			}
 
-			reader = response.body!.getReader();
+			if (!response.body) {
+				throw new Error("Proxy response body is missing");
+			}
+
+			const streamReader = response.body.getReader();
+			reader = streamReader;
 			const decoder = new TextDecoder();
 			let buffer = "";
 
 			while (true) {
-				const { done, value } = await reader.read();
+				const { done, value } = await streamReader.read();
 				if (done) break;
 
 				if (options.signal?.aborted) {
