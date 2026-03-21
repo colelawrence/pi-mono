@@ -3,6 +3,7 @@
 ## Upstream Sync
 For keeping this fork aligned with upstream Pi, read `UPSTREAM_SYNC.md` before starting a merge/sync task.
 Update that file after each upstream sync with conflict notes, retained carry patches, and verification steps.
+Keep the downstream delta small, sync often, never hand-merge generated models, and update `UPSTREAM_SYNC.md` every time a sync teaches you something.
 
 ## First Message
 If the user did not give you a concrete task in their first message,
