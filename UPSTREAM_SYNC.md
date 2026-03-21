@@ -47,6 +47,14 @@ git config rerere.enabled true
 - Keep local carry patches isolated by concern.
 - Do not mix unrelated feature work into upstream sync commits.
 - Generated file refreshes should be a separate commit when possible.
+- Sync frequently; small regular merges are much cheaper than infrequent large jumps.
+- Treat hot upstream core files as high-risk carry locations. Prefer seams, hooks, wrappers, or upstreaming over long-lived invasive edits.
+- Retire carry patches aggressively when upstream makes them unnecessary.
+- Separate categories of change when possible:
+  - upstream merge resolution
+  - handwritten downstream carry reapplication
+  - generated file refresh
+  - unrelated local feature work
 
 ## Current carry patches to watch
 
@@ -104,6 +112,27 @@ cd .references/pi-mono-effect
 ./install-epi.sh
 ```
 
+## Long-term maintenance guidance
+
+This workflow is maintainable if we keep the downstream delta small and intentional.
+
+Operational rules:
+- Prefer regular sync cadence (weekly / biweekly while the fork is active) over waiting for breakage.
+- The git strategy is merge-based and should stay that way; avoid rebase-heavy history rewriting for shared downstream branches.
+- The main cost driver is not git itself but local edits inside high-churn upstream files (`agent-session.ts`, `runner.ts`, `tui.ts`, etc.).
+- When a downstream behavior must exist, choose the least conflict-prone home available:
+  - upstream extension seam / callback
+  - wrapper/helper file
+  - isolated additive hook
+  - only as a last resort, direct edits in upstream core files
+- A healthy downstream branch should have shrinking carry, not accumulating carry.
+
+Review questions before finishing a sync:
+- Which carry patches are still truly required?
+- Which carries can be deleted because upstream now covers them?
+- Which carries should be moved to a cleaner seam before the next sync?
+- Did we accidentally mix generated churn or unrelated feature work into the sync?
+
 ## Conflict log template
 
 Append a short entry for each sync:
@@ -122,6 +151,11 @@ Append a short entry for each sync:
 - notes:
   - models.generated.ts regenerated as conflict/build resolution? yes/no
   - if yes, was it committed as a separate generated refresh? yes/no
+- reflection:
+  - what was surprisingly easy?
+  - what repeatedly caused friction?
+  - what carry patch should be reduced, moved, upstreamed, or retired before the next sync?
+  - what should be added or corrected in UPSTREAM_SYNC.md based on this round?
 ```
 
 ## Patch retirement rule
@@ -130,6 +164,17 @@ Whenever upstream absorbs one of our carry patches:
 - delete the local delta instead of preserving compatibility code
 - update this file to remove that patch from the carry inventory
 - note the upstream commit/PR that made the carry patch unnecessary
+
+## Post-sync reflection rule
+
+At the end of every sync, do a short retrospective before calling the branch done:
+- update the sync entry in this file with the actual conflict set and verification used
+- record any patch retirement, new carry patch, or carry-patch shrinkage
+- record whether generated files needed regeneration and whether that churn was kept or dropped
+- capture one or two lessons that would make the next sync easier
+- feed those lessons back into this file immediately rather than relying on memory
+
+If a sync exposed a recurring conflict pattern, confusing decision point, or better resolution rule, update the living guidance in this document during the same sync.
 
 ## Sync 2026-03-21
 - merged: `upstream/main @ f90647ea`
