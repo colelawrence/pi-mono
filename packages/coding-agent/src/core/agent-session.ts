@@ -1193,8 +1193,66 @@ export class AgentSession {
 				// The drain loop will pick it up via agent.continue().
 				this.agent.followUp(appMessage);
 			} else {
-				// Outside a turn (e.g., from a command handler or cold start).
-				// Start a new turn with its own drain loop.
+				// Outside a turn (e.g., from a command handler or cold start), route
+				// through the same AgentSession-owned turn startup choreography as prompt().
+				this._flushPendingBashMessages();
+
+				if (!this.model) {
+					throw new Error(
+						"No model selected.\n\n" +
+							`Use /login or set an API key environment variable. See ${join(getDocsPath(), "providers.md")}\n\n` +
+							"Then use /model to select a model.",
+					);
+				}
+
+				const apiKey = await this._modelRegistry.getApiKey(this.model);
+				if (!apiKey) {
+					const isOAuth = this._modelRegistry.isUsingOAuth(this.model);
+					if (isOAuth) {
+						throw new Error(
+							`Authentication failed for "${this.model.provider}". ` +
+								`Credentials may have expired or network is unavailable. ` +
+								`Run '/login ${this.model.provider}' to re-authenticate.`,
+						);
+					}
+					throw new Error(
+						`No API key found for ${this.model.provider}.\n\n` +
+							`Use /login or set an API key environment variable. See ${join(getDocsPath(), "providers.md")}`,
+					);
+				}
+
+				const lastAssistant = this._findLastAssistantMessage();
+				if (lastAssistant) {
+					await this._checkCompaction(lastAssistant, false);
+				}
+
+				const messages: AgentMessage[] = [appMessage];
+				for (const msg of this._pendingNextTurnMessages) {
+					messages.push(msg);
+				}
+				this._pendingNextTurnMessages = [];
+
+				if (this._extensionRunner) {
+					const result = await this._extensionRunner.emitBeforeAgentStart("", undefined, this._baseSystemPrompt);
+					if (result?.messages) {
+						for (const msg of result.messages) {
+							messages.push({
+								role: "custom",
+								customType: msg.customType,
+								content: msg.content,
+								display: msg.display,
+								details: msg.details,
+								timestamp: Date.now(),
+							});
+						}
+					}
+					if (result?.systemPrompt) {
+						this.agent.setSystemPrompt(result.systemPrompt);
+					} else {
+						this.agent.setSystemPrompt(this._baseSystemPrompt);
+					}
+				}
+
 				const isAbortedOrError = (msg: AgentMessage | undefined) => {
 					if (!msg) return false;
 					return (
@@ -1203,7 +1261,7 @@ export class AgentSession {
 							(msg as AssistantMessage).stopReason === "error")
 					);
 				};
-				await this._runtime.runCustomMessageCycle(this.agent, appMessage, isAbortedOrError);
+				await this._runtime.runPromptCycle(this.agent, messages, isAbortedOrError);
 			}
 		} else {
 			this.agent.appendMessage(appMessage);
