@@ -293,10 +293,11 @@ Fired by the `pi` CLI during startup session resolution, before the initial sess
 This event is:
 - CLI-only. It is not emitted in SDK mode.
 - Startup-only. It is not emitted for later interactive `/new` or `/resume` actions.
-- Bypassed when `--session-dir` is provided.
+- Lower priority than `--session-dir` and `sessionDir` in `settings.json`.
 - Special-cased to receive no `ctx` argument.
 
 If multiple extensions return `sessionDir`, the last one wins.
+Combined precedence is: `--session-dir` CLI flag, then `sessionDir` in settings, then extension `session_directory` hooks.
 
 ```typescript
 pi.on("session_directory", async (event) => {
@@ -564,17 +565,27 @@ Before `tool_call` runs, pi waits for previously emitted Agent events to finish 
 
 In the default parallel tool execution mode, sibling tool calls from the same assistant message are preflighted sequentially, then executed concurrently. `tool_call` is not guaranteed to see sibling tool results from that same assistant message in `ctx.sessionManager`.
 
+`event.input` is mutable. Mutate it in place to patch tool arguments before execution.
+
+Behavior guarantees:
+- Mutations to `event.input` affect the actual tool execution
+- Later `tool_call` handlers see mutations made by earlier handlers
+- No re-validation is performed after your mutation
+- Return values from `tool_call` only control blocking via `{ block: true, reason?: string }`
+
 ```typescript
 import { isToolCallEventType } from "@mariozechner/pi-coding-agent";
 
 pi.on("tool_call", async (event, ctx) => {
   // event.toolName - "bash", "read", "write", "edit", etc.
   // event.toolCallId
-  // event.input - tool parameters
+  // event.input - tool parameters (mutable)
 
   // Built-in tools: no type params needed
   if (isToolCallEventType("bash", event)) {
     // event.input is { command: string; timeout?: number }
+    event.input.command = `source ~/.profile\n${event.input.command}`;
+
     if (event.input.command.includes("rm -rf")) {
       return { block: true, reason: "Dangerous command" };
     }
@@ -618,6 +629,8 @@ Fired after tool execution finishes and before `tool_execution_end` plus the fin
 - Each handler sees the latest result after previous handler changes
 - Handlers can return partial patches (`content`, `details`, or `isError`); omitted fields keep their current values
 
+Use `ctx.signal` for nested async work inside the handler. This lets Esc cancel model calls, `fetch()`, and other abort-aware operations started by the extension.
+
 ```typescript
 import { isBashToolResult } from "@mariozechner/pi-coding-agent";
 
@@ -628,6 +641,12 @@ pi.on("tool_result", async (event, ctx) => {
   if (isBashToolResult(event)) {
     // event.details is typed as BashToolDetails
   }
+
+  const response = await fetch("https://example.com/summarize", {
+    method: "POST",
+    body: JSON.stringify({ content: event.content }),
+    signal: ctx.signal,
+  });
 
   // Modify result:
   return { content: [...], details: {...}, isError: false };
@@ -747,6 +766,31 @@ ctx.sessionManager.getLeafId()        // Current leaf entry ID
 ### ctx.modelRegistry / ctx.model
 
 Access to models and API keys.
+
+### ctx.signal
+
+The current agent abort signal, or `undefined` when no agent turn is active.
+
+Use this for abort-aware nested work started by extension handlers, for example:
+- `fetch(..., { signal: ctx.signal })`
+- model calls that accept `signal`
+- file or process helpers that accept `AbortSignal`
+
+`ctx.signal` is typically defined during active turn events such as `tool_call`, `tool_result`, `message_update`, and `turn_end`.
+It is usually `undefined` in idle or non-turn contexts such as session events, extension commands, and shortcuts fired while pi is idle.
+
+```typescript
+pi.on("tool_result", async (event, ctx) => {
+  const response = await fetch("https://example.com/api", {
+    method: "POST",
+    body: JSON.stringify(event),
+    signal: ctx.signal,
+  });
+
+  const data = await response.json();
+  return { details: data };
+});
+```
 
 ### ctx.isIdle() / ctx.abort() / ctx.hasPendingMessages()
 
@@ -976,8 +1020,8 @@ pi.registerTool({
   },
 
   // Optional: Custom rendering
-  renderCall(args, theme) { ... },
-  renderResult(result, options, theme) { ... },
+  renderCall(args, theme, context) { ... },
+  renderResult(result, options, theme, context) { ... },
 });
 ```
 
@@ -1089,6 +1133,8 @@ Labels persist in the session and survive restarts. Use them to mark important p
 
 Register a command.
 
+If multiple extensions register the same command name, pi keeps them all and assigns numeric invocation suffixes in load order, for example `/review:1` and `/review:2`.
+
 ```typescript
 pi.registerCommand("stats", {
   description: "Show session statistics",
@@ -1126,19 +1172,27 @@ The list matches the RPC `get_commands` ordering: extensions first, then templat
 ```typescript
 const commands = pi.getCommands();
 const bySource = commands.filter((command) => command.source === "extension");
+const userScoped = commands.filter((command) => command.sourceInfo.scope === "user");
 ```
 
 Each entry has this shape:
 
 ```typescript
 {
-  name: string; // Command name without the leading slash
+  name: string; // Invokable command name without the leading slash. May be suffixed like "review:1"
   description?: string;
   source: "extension" | "prompt" | "skill";
-  location?: "user" | "project" | "path"; // For templates and skills
-  path?: string; // Files backing templates, skills, and extensions
+  sourceInfo: {
+    path: string;
+    source: string;
+    scope: "user" | "project" | "temporary";
+    origin: "package" | "top-level";
+    baseDir?: string;
+  };
 }
 ```
+
+Use `sourceInfo` as the canonical provenance field. Do not infer ownership from command names or from ad hoc path parsing.
 
 Built-in interactive commands (like `/model` and `/settings`) are not included here. They are handled only in interactive
 mode and would not execute if sent via `prompt`.
@@ -1191,11 +1245,26 @@ const result = await pi.exec("git", ["status"], { signal, timeout: 5000 });
 Manage active tools. This works for both built-in tools and dynamically registered tools.
 
 ```typescript
-const active = pi.getActiveTools();  // ["read", "bash", "edit", "write"]
-const all = pi.getAllTools();        // [{ name: "read", description: "Read file contents..." }, ...]
-const names = all.map(t => t.name);  // Just names if needed
+const active = pi.getActiveTools();
+const all = pi.getAllTools();
+// [{
+//   name: "read",
+//   description: "Read file contents...",
+//   parameters: ..., 
+//   sourceInfo: { path: "<builtin:read>", source: "builtin", scope: "temporary", origin: "top-level" }
+// }, ...]
+const names = all.map(t => t.name);
+const builtinTools = all.filter((t) => t.sourceInfo.source === "builtin");
+const extensionTools = all.filter((t) => t.sourceInfo.source !== "builtin" && t.sourceInfo.source !== "sdk");
 pi.setActiveTools(["read", "bash"]); // Switch to read-only
 ```
+
+`pi.getAllTools()` returns `name`, `description`, `parameters`, and `sourceInfo`.
+
+Typical `sourceInfo.source` values:
+- `builtin` for built-in tools
+- `sdk` for tools passed via `createAgentSession({ customTools })`
+- extension source metadata for tools registered by extensions
 
 ### pi.setModel(model)
 
@@ -1427,8 +1496,8 @@ pi.registerTool({
   },
 
   // Optional: Custom rendering
-  renderCall(args, theme) { ... },
-  renderResult(result, options, theme) { ... },
+  renderCall(args, theme, context) { ... },
+  renderResult(result, options, theme, context) { ... },
 });
 ```
 
@@ -1463,7 +1532,9 @@ pi --no-tools -e ./my-extension.ts
 
 See [examples/extensions/tool-override.ts](../examples/extensions/tool-override.ts) for a complete example that overrides `read` with logging and access control.
 
-**Rendering:** If your override doesn't provide custom `renderCall`/`renderResult` functions, the built-in renderer is used automatically (syntax highlighting, diffs, etc.). This lets you wrap built-in tools for logging or access control without reimplementing the UI.
+**Rendering:** Built-in renderer inheritance is resolved per slot. Execution override and rendering override are independent. If your override omits `renderCall`, the built-in `renderCall` is used. If your override omits `renderResult`, the built-in `renderResult` is used. If your override omits both, the built-in renderer is used automatically (syntax highlighting, diffs, etc.). This lets you wrap built-in tools for logging or access control without reimplementing the UI.
+
+**Prompt metadata:** `promptSnippet` and `promptGuidelines` are not inherited from the built-in tool. If your override should keep those prompt instructions, define them on the override explicitly.
 
 **Your implementation must match the exact result shape**, including the `details` type. The UI and session logic depend on these shapes for rendering and state tracking.
 
@@ -1597,44 +1668,52 @@ export default function (pi: ExtensionAPI) {
 
 ### Custom Rendering
 
-Tools can provide `renderCall` and `renderResult` for custom TUI display. See [tui.md](tui.md) for the full component API and [tool-execution.ts](https://github.com/badlogic/pi-mono/blob/main/packages/coding-agent/src/modes/interactive/components/tool-execution.ts) for how built-in tools render.
+Tools can provide `renderCall` and `renderResult` for custom TUI display. See [tui.md](tui.md) for the full component API and [tool-execution.ts](https://github.com/badlogic/pi-mono/blob/main/packages/coding-agent/src/modes/interactive/components/tool-execution.ts) for how tool rows are composed.
 
-Tool output is wrapped in a `Box` that handles padding and background. Your render methods return `Component` instances (typically `Text`).
+Tool output is wrapped in a `Box` that handles padding and background. A defined `renderCall` or `renderResult` must return a `Component`. If a slot renderer is not defined, `tool-execution.ts` uses fallback rendering for that slot.
+
+`renderCall` and `renderResult` each receive a `context` object with:
+- `args` - the current tool call arguments
+- `state` - shared row-local state across `renderCall` and `renderResult`
+- `lastComponent` - the previously returned component for that slot, if any
+- `invalidate()` - request a rerender of this tool row
+- `toolCallId`, `cwd`, `executionStarted`, `argsComplete`, `isPartial`, `expanded`, `showImages`, `isError`
+
+Use `context.state` for cross-slot shared state. Keep slot-local caches on the returned component instance when you want to reuse and mutate the same component across renders.
 
 #### renderCall
 
-Renders the tool call (before/during execution):
+Renders the tool call or header:
 
 ```typescript
 import { Text } from "@mariozechner/pi-tui";
 
-renderCall(args, theme) {
-  let text = theme.fg("toolTitle", theme.bold("my_tool "));
-  text += theme.fg("muted", args.action);
+renderCall(args, theme, context) {
+  const text = (context.lastComponent as Text | undefined) ?? new Text("", 0, 0);
+  let content = theme.fg("toolTitle", theme.bold("my_tool "));
+  content += theme.fg("muted", args.action);
   if (args.text) {
-    text += " " + theme.fg("dim", `"${args.text}"`);
+    content += " " + theme.fg("dim", `"${args.text}"`);
   }
-  return new Text(text, 0, 0);  // 0,0 padding - Box handles it
+  text.setText(content);
+  return text;
 }
 ```
 
 #### renderResult
 
-Renders the tool result:
+Renders the tool result or output:
 
 ```typescript
-renderResult(result, { expanded, isPartial }, theme) {
-  // Handle streaming
+renderResult(result, { expanded, isPartial }, theme, context) {
   if (isPartial) {
     return new Text(theme.fg("warning", "Processing..."), 0, 0);
   }
 
-  // Handle errors
   if (result.details?.error) {
     return new Text(theme.fg("error", `Error: ${result.details.error}`), 0, 0);
   }
 
-  // Normal result - support expanded view (Ctrl+O)
   let text = theme.fg("success", "✓ Done");
   if (expanded && result.details?.items) {
     for (const item of result.details.items) {
@@ -1645,6 +1724,8 @@ renderResult(result, { expanded, isPartial }, theme) {
 }
 ```
 
+If a slot intentionally has no visible content, return an empty `Component` such as an empty `Container`.
+
 #### Keybinding Hints
 
 Use `keyHint()` to display keybinding hints that respect the active keybinding configuration:
@@ -1652,7 +1733,7 @@ Use `keyHint()` to display keybinding hints that respect the active keybinding c
 ```typescript
 import { keyHint } from "@mariozechner/pi-coding-agent";
 
-renderResult(result, { expanded }, theme) {
+renderResult(result, { expanded }, theme, context) {
   let text = theme.fg("success", "✓ Done");
   if (!expanded) {
     text += ` (${keyHint("app.tools.expand", "to expand")})`;
@@ -1676,16 +1757,19 @@ Custom editors and `ctx.ui.custom()` components receive `keybindings: Keybinding
 
 #### Best Practices
 
-- Use `Text` with padding `(0, 0)` - the Box handles padding
-- Use `\n` for multi-line content
-- Handle `isPartial` for streaming progress
-- Support `expanded` for detail on demand
-- Keep default view compact
+- Use `Text` with padding `(0, 0)`. The Box handles padding.
+- Use `\n` for multi-line content.
+- Handle `isPartial` for streaming progress.
+- Support `expanded` for detail on demand.
+- Keep default view compact.
+- Read `context.args` in `renderResult` instead of copying args into `context.state`.
+- Use `context.state` only for data that must be shared across call and result slots.
+- Reuse `context.lastComponent` when the same component instance can be updated in place.
 
 #### Fallback
 
-If `renderCall`/`renderResult` is not defined or throws:
-- `renderCall`: Shows tool name
+If a slot renderer is not defined or throws:
+- `renderCall`: Shows the tool name
 - `renderResult`: Shows raw text from `content`
 
 ## Custom UI

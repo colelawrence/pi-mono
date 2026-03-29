@@ -192,3 +192,25 @@ If a sync exposed a recurring conflict pattern, confusing decision point, or bet
   - current carry patch still expected: `packages/tui/src/tui.ts` — keep render failures and overwide lines loud but non-fatal
   - `packages/agent/src/proxy.ts` no longer required a downstream carry patch after this sync; `npm run build` passed without local delta
   - `packages/ai/src/models.generated.ts` was regenerated during verification, but incidental churn should be left out of the sync merge unless intentionally committed as a separate generated refresh
+
+## Sync 2026-03-29
+- merged: `upstream/main @ fa890e3f`
+- branch: `sync/upstream-2026-03-29`
+- conflicts:
+  - `packages/coding-agent/src/core/agent-session.ts` — kept upstream definition-first tool/runtime structure, reapplied downstream epi runtime bridge and `epi_user_turn_ready` emission
+  - `packages/coding-agent/src/core/extensions/loader.ts` — combined upstream extension source metadata with downstream host-capability runtime exposure
+  - `packages/tui/src/tui.ts` — kept upstream resize/cell-size flow, reapplied downstream non-fatal render overflow and render-error recovery
+  - `packages/agent/package.json`, `packages/coding-agent/package.json`, `package-lock.json` — updated to upstream package versions while preserving downstream-required dependencies (`@sinclair/typebox`, `@opentelemetry/api`)
+- verification:
+  - [x] `cd packages/tui && node --test --import tsx test/tui-render.test.ts`
+  - [x] `cd packages/coding-agent && npx tsx ../../node_modules/vitest/dist/cli.js --run test/host-capabilities.test.ts test/trigger-compact-extension.test.ts`
+  - [x] `npm run check`
+- notes:
+  - current carry patches still expected: `packages/tui/src/tui.ts` for loud-but-non-fatal render failures/overwide lines, `packages/coding-agent/src/core/agent-session.ts` for epi runtime + turn-ready integration, and `packages/coding-agent/src/core/extensions/loader.ts` for host-capability exposure alongside upstream source info
+  - `packages/ai/src/models.generated.ts` came across from upstream merge; no additional local regeneration was needed and no separate generated refresh commit was created
+  - the checked-out `effect-native-core` worktree had pre-existing local dirt in `packages/ai/src/models.generated.ts`, so this sync was prepared on a temporary worktree branch instead of updating that checkout in place
+- reflection:
+  - surprisingly easy: upstream’s tool-definition refactor in `agent-session.ts` auto-merged cleanly outside the import seam, so the downstream epi carry stayed narrow
+  - repeated friction: package-manager state lives outside the git worktree; temporary sync worktrees need shared `node_modules` symlinks before verification
+  - next carry to reduce: move `epi_user_turn_ready` and epi runtime exposure farther out of `agent-session.ts` if a cleaner extension/session seam becomes available
+  - process update: when the primary checkout is dirty, prefer a temporary sync worktree immediately instead of discovering that constraint mid-merge

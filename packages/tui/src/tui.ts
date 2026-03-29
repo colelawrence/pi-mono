@@ -223,8 +223,6 @@ export class TUI extends Container {
 	private renderRequested = false;
 	private cursorRow = 0; // Logical cursor row (end of rendered content)
 	private hardwareCursorRow = 0; // Actual terminal cursor row (may differ due to IME positioning)
-	private inputBuffer = ""; // Buffer for parsing terminal responses
-	private cellSizeQueryPending = false;
 	private showHardwareCursor = process.env.PI_HARDWARE_CURSOR === "1";
 	private clearOnShrink = process.env.PI_CLEAR_ON_SHRINK === "1"; // Clear empty rows when content shrinks (default: off)
 	private maxLinesRendered = 0; // Track terminal's working area (max lines ever rendered)
@@ -439,7 +437,6 @@ export class TUI extends Container {
 		}
 		// Query terminal for cell size in pixels: CSI 16 t
 		// Response format: CSI 6 ; height ; width t
-		this.cellSizeQueryPending = true;
 		this.terminal.write("\x1b[16t");
 	}
 
@@ -497,12 +494,9 @@ export class TUI extends Container {
 			data = current;
 		}
 
-		// If we're waiting for cell size response, buffer input and parse
-		if (this.cellSizeQueryPending) {
-			this.inputBuffer += data;
-			const filtered = this.parseCellSizeResponse();
-			if (filtered.length === 0) return;
-			data = filtered;
+		// Consume terminal cell size responses without blocking unrelated input.
+		if (this.consumeCellSizeResponse(data)) {
+			return;
 		}
 
 		// Global debug key handler (Shift+Ctrl+D)
@@ -537,46 +531,24 @@ export class TUI extends Container {
 		}
 	}
 
-	private parseCellSizeResponse(): string {
+	private consumeCellSizeResponse(data: string): boolean {
 		// Response format: ESC [ 6 ; height ; width t
-		// Match the response pattern
-		const responsePattern = /\x1b\[6;(\d+);(\d+)t/;
-		const match = this.inputBuffer.match(responsePattern);
-
-		if (match) {
-			const heightPx = parseInt(match[1], 10);
-			const widthPx = parseInt(match[2], 10);
-
-			if (heightPx > 0 && widthPx > 0) {
-				setCellDimensions({ widthPx, heightPx });
-				// Invalidate all components so images re-render with correct dimensions
-				this.invalidate();
-				this.requestRender();
-			}
-
-			// Remove the response from buffer
-			this.inputBuffer = this.inputBuffer.replace(responsePattern, "");
-			this.cellSizeQueryPending = false;
+		const match = data.match(/^\x1b\[6;(\d+);(\d+)t$/);
+		if (!match) {
+			return false;
 		}
 
-		// Check if we have a partial cell size response starting (wait for more data)
-		// Patterns that could be incomplete cell size response: \x1b, \x1b[, \x1b[6, \x1b[6;...(no t yet)
-		const partialCellSizePattern = /\x1b(\[6?;?[\d;]*)?$/;
-		if (partialCellSizePattern.test(this.inputBuffer)) {
-			// Check if it's actually a complete different escape sequence (ends with a letter)
-			// Cell size response ends with 't', Kitty keyboard ends with 'u', arrows end with A-D, etc.
-			const lastChar = this.inputBuffer[this.inputBuffer.length - 1];
-			if (!/[a-zA-Z~]/.test(lastChar)) {
-				// Doesn't end with a terminator, might be incomplete - wait for more
-				return "";
-			}
+		const heightPx = parseInt(match[1], 10);
+		const widthPx = parseInt(match[2], 10);
+		if (heightPx <= 0 || widthPx <= 0) {
+			return true;
 		}
 
-		// No cell size response found, return buffered data as user input
-		const result = this.inputBuffer;
-		this.inputBuffer = "";
-		this.cellSizeQueryPending = false; // Give up waiting
-		return result;
+		setCellDimensions({ widthPx, heightPx });
+		// Invalidate all components so images re-render with correct dimensions.
+		this.invalidate();
+		this.requestRender();
+		return true;
 	}
 
 	/**
@@ -874,8 +846,11 @@ export class TUI extends Container {
 		if (this.stopped) return;
 		const width = this.terminal.columns;
 		const height = this.terminal.rows;
-		let viewportTop = Math.max(0, this.maxLinesRendered - height);
-		let prevViewportTop = this.previousViewportTop;
+		const widthChanged = this.previousWidth !== 0 && this.previousWidth !== width;
+		const heightChanged = this.previousHeight !== 0 && this.previousHeight !== height;
+		const previousBufferLength = this.previousHeight > 0 ? this.previousViewportTop + this.previousHeight : height;
+		let prevViewportTop = heightChanged ? Math.max(0, previousBufferLength - height) : this.previousViewportTop;
+		let viewportTop = prevViewportTop;
 		let hardwareCursorRow = this.hardwareCursorRow;
 		const computeLineDiff = (targetRow: number): number => {
 			const currentScreenRow = hardwareCursorRow - prevViewportTop;
@@ -926,10 +901,6 @@ export class TUI extends Container {
 			cursorPos = null;
 		}
 
-		// Width or height changed - need full re-render
-		const widthChanged = this.previousWidth !== 0 && this.previousWidth !== width;
-		const heightChanged = this.previousHeight !== 0 && this.previousHeight !== height;
-
 		// Helper to clear scrollback and viewport and render all new lines
 		const fullRender = (clear: boolean): void => {
 			this.fullRedrawCount += 1;
@@ -977,7 +948,8 @@ export class TUI extends Container {
 			} else {
 				this.maxLinesRendered = Math.max(this.maxLinesRendered, newLines.length);
 			}
-			this.previousViewportTop = Math.max(0, this.maxLinesRendered - height);
+			const bufferLength = Math.max(height, newLines.length);
+			this.previousViewportTop = Math.max(0, bufferLength - height);
 			this.positionHardwareCursor(cursorPos, newLines.length);
 			this.previousLines = newLines;
 			this.previousWidth = width;
@@ -1051,7 +1023,7 @@ export class TUI extends Container {
 		// No changes - but still need to update hardware cursor position if it moved
 		if (firstChanged === -1) {
 			this.positionHardwareCursor(cursorPos, newLines.length);
-			this.previousViewportTop = Math.max(0, this.maxLinesRendered - height);
+			this.previousViewportTop = prevViewportTop;
 			this.previousHeight = height;
 			return;
 		}
@@ -1062,6 +1034,11 @@ export class TUI extends Container {
 				let buffer = "\x1b[?2026h";
 				// Move to end of new content (clamp to 0 for empty content)
 				const targetRow = Math.max(0, newLines.length - 1);
+				if (targetRow < prevViewportTop) {
+					logRedraw(`deleted lines moved viewport up (${targetRow} < ${prevViewportTop})`);
+					fullRender(true);
+					return;
+				}
 				const lineDiff = computeLineDiff(targetRow);
 				if (lineDiff > 0) buffer += `\x1b[${lineDiff}B`;
 				else if (lineDiff < 0) buffer += `\x1b[${-lineDiff}A`;
@@ -1092,16 +1069,14 @@ export class TUI extends Container {
 			this.previousLines = newLines;
 			this.previousWidth = width;
 			this.previousHeight = height;
-			this.previousViewportTop = Math.max(0, this.maxLinesRendered - height);
+			this.previousViewportTop = prevViewportTop;
 			return;
 		}
 
-		// Check if firstChanged is above what was previously visible
-		// Use previousLines.length (not maxLinesRendered) to avoid false positives after content shrinks
-		const previousContentViewportTop = Math.max(0, this.previousLines.length - height);
-		if (firstChanged < previousContentViewportTop) {
-			// First change is above previous viewport - need full re-render
-			logRedraw(`firstChanged < viewportTop (${firstChanged} < ${previousContentViewportTop})`);
+		// Differential rendering can only touch what was actually visible.
+		// If the first changed line is above the previous viewport, we need a full redraw.
+		if (firstChanged < prevViewportTop) {
+			logRedraw(`firstChanged < viewportTop (${firstChanged} < ${prevViewportTop})`);
 			fullRender(true);
 			return;
 		}
@@ -1232,7 +1207,7 @@ export class TUI extends Container {
 		this.hardwareCursorRow = finalCursorRow;
 		// Track terminal's working area (grows but doesn't shrink unless cleared)
 		this.maxLinesRendered = Math.max(this.maxLinesRendered, newLines.length);
-		this.previousViewportTop = Math.max(0, this.maxLinesRendered - height);
+		this.previousViewportTop = Math.max(prevViewportTop, finalCursorRow - height + 1);
 
 		// Position hardware cursor for IME
 		this.positionHardwareCursor(cursorPos, newLines.length);

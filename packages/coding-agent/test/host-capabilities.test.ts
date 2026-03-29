@@ -38,6 +38,7 @@ describe("host capabilities", () => {
 		const extensionContextActions: ExtensionContextActions = {
 			getModel: () => undefined,
 			isIdle: () => true,
+			getSignal: () => undefined,
 			abort: () => {},
 			hasPendingMessages: () => false,
 			shutdown: () => {},

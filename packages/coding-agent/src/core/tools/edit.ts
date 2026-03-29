@@ -1,24 +1,47 @@
 import type { AgentTool } from "@mariozechner/pi-agent-core";
+import { Container, Text } from "@mariozechner/pi-tui";
 import { type Static, Type } from "@sinclair/typebox";
 import { constants } from "fs";
 import { access as fsAccess, readFile as fsReadFile, writeFile as fsWriteFile } from "fs/promises";
+import { renderDiff } from "../../modes/interactive/components/diff.js";
+import type { ToolDefinition } from "../extensions/types.js";
 import {
+	applyEditsToNormalizedContent,
 	detectLineEnding,
-	fuzzyFindText,
+	type Edit,
 	generateDiffString,
-	normalizeForFuzzyMatch,
 	normalizeToLF,
 	restoreLineEndings,
 	stripBom,
 } from "./edit-diff.js";
 import { withFileMutationQueue } from "./file-mutation-queue.js";
 import { resolveToCwd } from "./path-utils.js";
+import { invalidArgText, shortenPath, str } from "./render-utils.js";
+import { wrapToolDefinition } from "./tool-definition-wrapper.js";
 
-const editSchema = Type.Object({
-	path: Type.String({ description: "Path to the file to edit (relative or absolute)" }),
-	oldText: Type.String({ description: "Exact text to find and replace (must match exactly)" }),
-	newText: Type.String({ description: "New text to replace the old text with" }),
-});
+type EditRenderState = Record<string, never>;
+
+const replaceEditSchema = Type.Object(
+	{
+		oldText: Type.String({
+			description:
+				"Exact text for one targeted replacement. It must be unique in the original file and must not overlap with any other edits[].oldText in the same call.",
+		}),
+		newText: Type.String({ description: "Replacement text for this targeted edit." }),
+	},
+	{ additionalProperties: false },
+);
+
+const editSchema = Type.Object(
+	{
+		path: Type.String({ description: "Path to the file to edit (relative or absolute)" }),
+		edits: Type.Array(replaceEditSchema, {
+			description:
+				"One or more targeted replacements. Each edit is matched against the original file, not incrementally. Do not include overlapping or nested edits. If two changes touch the same block or nearby lines, merge them into one edit instead.",
+		}),
+	},
+	{ additionalProperties: false },
+);
 
 export type EditToolInput = Static<typeof editSchema>;
 
@@ -31,7 +54,7 @@ export interface EditToolDetails {
 
 /**
  * Pluggable operations for the edit tool.
- * Override these to delegate file editing to remote systems (e.g., SSH).
+ * Override these to delegate file editing to remote systems (for example SSH).
  */
 export interface EditOperations {
 	/** Read file contents as a Buffer */
@@ -53,20 +76,86 @@ export interface EditToolOptions {
 	operations?: EditOperations;
 }
 
-export function createEditTool(cwd: string, options?: EditToolOptions): AgentTool<typeof editSchema> {
-	const ops = options?.operations ?? defaultEditOperations;
+function validateEditInput(input: EditToolInput): { path: string; edits: Edit[] } {
+	if (!Array.isArray(input.edits)) {
+		throw new Error(
+			"Edit tool input is invalid. edits must be an array of replacements in the form { oldText: string, newText: string }.",
+		);
+	}
+	if (input.edits.length === 0) {
+		throw new Error("Edit tool input is invalid. edits must contain at least one replacement.");
+	}
+	return { path: input.path, edits: input.edits };
+}
 
+type RenderableEditArgs = {
+	path?: string;
+	file_path?: string;
+	edits?: Edit[];
+	oldText?: string;
+	newText?: string;
+};
+
+function formatEditCall(
+	args: RenderableEditArgs | undefined,
+	theme: typeof import("../../modes/interactive/theme/theme.js").theme,
+): string {
+	const invalidArg = invalidArgText(theme);
+	const rawPath = str(args?.file_path ?? args?.path);
+	const path = rawPath !== null ? shortenPath(rawPath) : null;
+	const pathDisplay = path === null ? invalidArg : path ? theme.fg("accent", path) : theme.fg("toolOutput", "...");
+	return `${theme.fg("toolTitle", theme.bold("edit"))} ${pathDisplay}`;
+}
+
+function formatEditResult(
+	args: RenderableEditArgs | undefined,
+	result: {
+		content: Array<{ type: string; text?: string; data?: string; mimeType?: string }>;
+		details?: EditToolDetails;
+	},
+	theme: typeof import("../../modes/interactive/theme/theme.js").theme,
+	isError: boolean,
+): string | undefined {
+	const rawPath = str(args?.file_path ?? args?.path);
+	if (isError) {
+		const errorText = result.content
+			.filter((c) => c.type === "text")
+			.map((c) => c.text || "")
+			.join("\n");
+		if (!errorText) {
+			return undefined;
+		}
+		return `\n${theme.fg("error", errorText)}`;
+	}
+
+	const resultDiff = result.details?.diff;
+	if (!resultDiff) {
+		return undefined;
+	}
+	return `\n${renderDiff(resultDiff, { filePath: rawPath ?? undefined })}`;
+}
+
+export function createEditToolDefinition(
+	cwd: string,
+	options?: EditToolOptions,
+): ToolDefinition<typeof editSchema, EditToolDetails | undefined, EditRenderState> {
+	const ops = options?.operations ?? defaultEditOperations;
 	return {
 		name: "edit",
 		label: "edit",
 		description:
-			"Edit a file by replacing exact text. The oldText must match exactly (including whitespace). Use this for precise, surgical edits.",
+			"Edit a single file using exact text replacement. Every edits[].oldText must match a unique, non-overlapping region of the original file. If two changes affect the same block or nearby lines, merge them into one edit instead of emitting overlapping edits. Do not include large unchanged regions just to connect distant changes.",
+		promptSnippet:
+			"Make precise file edits with exact text replacement, including multiple disjoint edits in one call",
+		promptGuidelines: [
+			"Use edit for precise changes (edits[].oldText must match exactly)",
+			"When changing multiple separate locations in one file, use one edit call with multiple entries in edits[] instead of multiple edit calls",
+			"Each edits[].oldText is matched against the original file, not after earlier edits are applied. Do not emit overlapping or nested edits. Merge nearby changes into one edit.",
+			"Keep edits[].oldText as small as possible while still being unique in the file. Do not pad with large unchanged regions.",
+		],
 		parameters: editSchema,
-		execute: async (
-			_toolCallId: string,
-			{ path, oldText, newText }: { path: string; oldText: string; newText: string },
-			signal?: AbortSignal,
-		) => {
+		async execute(_toolCallId, input: EditToolInput, signal?: AbortSignal, _onUpdate?, _ctx?) {
+			const { path, edits } = validateEditInput(input);
 			const absolutePath = resolveToCwd(path, cwd);
 
 			return withFileMutationQueue(
@@ -76,7 +165,7 @@ export function createEditTool(cwd: string, options?: EditToolOptions): AgentToo
 						content: Array<{ type: "text"; text: string }>;
 						details: EditToolDetails | undefined;
 					}>((resolve, reject) => {
-						// Check if already aborted
+						// Check if already aborted.
 						if (signal?.aborted) {
 							reject(new Error("Operation aborted"));
 							return;
@@ -84,7 +173,7 @@ export function createEditTool(cwd: string, options?: EditToolOptions): AgentToo
 
 						let aborted = false;
 
-						// Set up abort handler
+						// Set up abort handler.
 						const onAbort = () => {
 							aborted = true;
 							reject(new Error("Operation aborted"));
@@ -94,10 +183,10 @@ export function createEditTool(cwd: string, options?: EditToolOptions): AgentToo
 							signal.addEventListener("abort", onAbort, { once: true });
 						}
 
-						// Perform the edit operation
-						(async () => {
+						// Perform the edit operation.
+						void (async () => {
 							try {
-								// Check if file exists
+								// Check if file exists.
 								try {
 									await ops.access(absolutePath);
 								} catch {
@@ -108,95 +197,44 @@ export function createEditTool(cwd: string, options?: EditToolOptions): AgentToo
 									return;
 								}
 
-								// Check if aborted before reading
+								// Check if aborted before reading.
 								if (aborted) {
 									return;
 								}
 
-								// Read the file
+								// Read the file.
 								const buffer = await ops.readFile(absolutePath);
 								const rawContent = buffer.toString("utf-8");
 
-								// Check if aborted after reading
+								// Check if aborted after reading.
 								if (aborted) {
 									return;
 								}
 
-								// Strip BOM before matching (LLM won't include invisible BOM in oldText)
+								// Strip BOM before matching. The model will not include an invisible BOM in oldText.
 								const { bom, text: content } = stripBom(rawContent);
-
 								const originalEnding = detectLineEnding(content);
 								const normalizedContent = normalizeToLF(content);
-								const normalizedOldText = normalizeToLF(oldText);
-								const normalizedNewText = normalizeToLF(newText);
+								const { baseContent, newContent } = applyEditsToNormalizedContent(
+									normalizedContent,
+									edits,
+									path,
+								);
 
-								// Find the old text using fuzzy matching (tries exact match first, then fuzzy)
-								const matchResult = fuzzyFindText(normalizedContent, normalizedOldText);
-
-								if (!matchResult.found) {
-									if (signal) {
-										signal.removeEventListener("abort", onAbort);
-									}
-									reject(
-										new Error(
-											`Could not find the exact text in ${path}. The old text must match exactly including all whitespace and newlines.`,
-										),
-									);
-									return;
-								}
-
-								// Count occurrences using fuzzy-normalized content for consistency
-								const fuzzyContent = normalizeForFuzzyMatch(normalizedContent);
-								const fuzzyOldText = normalizeForFuzzyMatch(normalizedOldText);
-								const occurrences = fuzzyContent.split(fuzzyOldText).length - 1;
-
-								if (occurrences > 1) {
-									if (signal) {
-										signal.removeEventListener("abort", onAbort);
-									}
-									reject(
-										new Error(
-											`Found ${occurrences} occurrences of the text in ${path}. The text must be unique. Please provide more context to make it unique.`,
-										),
-									);
-									return;
-								}
-
-								// Check if aborted before writing
+								// Check if aborted before writing.
 								if (aborted) {
-									return;
-								}
-
-								// Perform replacement using the matched text position
-								// When fuzzy matching was used, contentForReplacement is the normalized version
-								const baseContent = matchResult.contentForReplacement;
-								const newContent =
-									baseContent.substring(0, matchResult.index) +
-									normalizedNewText +
-									baseContent.substring(matchResult.index + matchResult.matchLength);
-
-								// Verify the replacement actually changed something
-								if (baseContent === newContent) {
-									if (signal) {
-										signal.removeEventListener("abort", onAbort);
-									}
-									reject(
-										new Error(
-											`No changes made to ${path}. The replacement produced identical content. This might indicate an issue with special characters or the text not existing as expected.`,
-										),
-									);
 									return;
 								}
 
 								const finalContent = bom + restoreLineEndings(newContent, originalEnding);
 								await ops.writeFile(absolutePath, finalContent);
 
-								// Check if aborted after writing
+								// Check if aborted after writing.
 								if (aborted) {
 									return;
 								}
 
-								// Clean up abort handler
+								// Clean up abort handler.
 								if (signal) {
 									signal.removeEventListener("abort", onAbort);
 								}
@@ -206,27 +244,48 @@ export function createEditTool(cwd: string, options?: EditToolOptions): AgentToo
 									content: [
 										{
 											type: "text",
-											text: `Successfully replaced text in ${path}.`,
+											text: `Successfully replaced ${edits.length} block(s) in ${path}.`,
 										},
 									],
 									details: { diff: diffResult.diff, firstChangedLine: diffResult.firstChangedLine },
 								});
-							} catch (error: any) {
-								// Clean up abort handler
+							} catch (error: unknown) {
+								// Clean up abort handler.
 								if (signal) {
 									signal.removeEventListener("abort", onAbort);
 								}
 
 								if (!aborted) {
-									reject(error);
+									reject(error instanceof Error ? error : new Error(String(error)));
 								}
 							}
 						})();
 					}),
 			);
 		},
+		renderCall(args, theme, context) {
+			const text = (context.lastComponent as Text | undefined) ?? new Text("", 0, 0);
+			text.setText(formatEditCall(args, theme));
+			return text;
+		},
+		renderResult(result, _options, theme, context) {
+			const output = formatEditResult(context.args, result as any, theme, context.isError);
+			if (!output) {
+				const component = (context.lastComponent as Container | undefined) ?? new Container();
+				component.clear();
+				return component;
+			}
+			const text = (context.lastComponent as Text | undefined) ?? new Text("", 0, 0);
+			text.setText(output);
+			return text;
+		},
 	};
 }
 
-/** Default edit tool using process.cwd() - for backwards compatibility */
+export function createEditTool(cwd: string, options?: EditToolOptions): AgentTool<typeof editSchema> {
+	return wrapToolDefinition(createEditToolDefinition(cwd, options));
+}
+
+/** Default edit tool using process.cwd() for backwards compatibility. */
+export const editToolDefinition = createEditToolDefinition(process.cwd());
 export const editTool = createEditTool(process.cwd());

@@ -79,10 +79,12 @@ import type { BranchSummaryEntry, CompactionEntry, SessionManager } from "./sess
 import { CURRENT_SESSION_VERSION, getLatestCompactionEntry, type SessionHeader } from "./session-manager.js";
 import { createSessionRuntime, type SessionRuntime } from "./session-runtime.js";
 import type { SettingsManager } from "./settings-manager.js";
-import { BUILTIN_SLASH_COMMANDS, type SlashCommandInfo, type SlashCommandLocation } from "./slash-commands.js";
+import type { SlashCommandInfo } from "./slash-commands.js";
+import { createSyntheticSourceInfo, type SourceInfo } from "./source-info.js";
 import { buildSystemPrompt } from "./system-prompt.js";
 import type { BashOperations } from "./tools/bash.js";
-import { createAllTools } from "./tools/index.js";
+import { createAllToolDefinitions } from "./tools/index.js";
+import { createToolDefinitionFromAgentTool, wrapToolDefinition } from "./tools/tool-definition-wrapper.js";
 import { shouldEmitEpiUserTurnReady } from "./user-turn-ready.js";
 
 // ============================================================================
@@ -115,9 +117,15 @@ export function parseSkillBlock(text: string): ParsedSkillBlock | null {
 /** Session-specific events that extend the core AgentEvent */
 export type AgentSessionEvent =
 	| AgentEvent
-	| { type: "auto_compaction_start"; reason: "threshold" | "overflow" }
 	| {
-			type: "auto_compaction_end";
+			type: "queue_update";
+			steering: readonly string[];
+			followUp: readonly string[];
+	  }
+	| { type: "compaction_start"; reason: "manual" | "threshold" | "overflow" }
+	| {
+			type: "compaction_end";
+			reason: "manual" | "threshold" | "overflow";
 			result: CompactionResult | undefined;
 			aborted: boolean;
 			willRetry: boolean;
@@ -148,7 +156,12 @@ export interface AgentSessionConfig {
 	modelRegistry: ModelRegistry;
 	/** Initial active built-in tool names. Default: [read, bash, edit, write] */
 	initialActiveToolNames?: string[];
-	/** Override base tools (useful for custom runtimes). */
+	/**
+	 * Override base tools (useful for custom runtimes).
+	 *
+	 * These are synthesized into minimal ToolDefinitions internally so AgentSession can keep
+	 * a definition-first registry even when callers provide plain AgentTool instances.
+	 */
 	baseToolsOverride?: Record<string, AgentTool>;
 	/** Mutable ref used by Agent to access the current ExtensionRunner */
 	extensionRunnerRef?: { current?: ExtensionRunner };
@@ -198,6 +211,12 @@ export interface SessionStats {
 		total: number;
 	};
 	cost: number;
+	contextUsage?: ContextUsage;
+}
+
+interface ToolDefinitionEntry {
+	definition: ToolDefinition;
+	sourceInfo: SourceInfo;
 }
 
 // ============================================================================
@@ -253,7 +272,7 @@ export class AgentSession {
 
 	private _resourceLoader: ResourceLoader;
 	private _customTools: ToolDefinition[];
-	private _baseToolRegistry: Map<string, AgentTool> = new Map();
+	private _baseToolDefinitions: Map<string, ToolDefinition> = new Map();
 	private _cwd: string;
 	private _extensionRunnerRef?: { current?: ExtensionRunner };
 	private _initialActiveToolNames?: string[];
@@ -269,6 +288,7 @@ export class AgentSession {
 
 	// Tool registry for extension getTools/setTools
 	private _toolRegistry: Map<string, AgentTool> = new Map();
+	private _toolDefinitions: Map<string, ToolDefinitionEntry> = new Map();
 	private _toolPromptSnippets: Map<string, string> = new Map();
 	private _toolPromptGuidelines: Map<string, string[]> = new Map();
 
@@ -313,6 +333,32 @@ export class AgentSession {
 	/** Model registry for API key resolution and model discovery */
 	get modelRegistry(): ModelRegistry {
 		return this._modelRegistry;
+	}
+
+	private async _getRequiredRequestAuth(model: Model<any>): Promise<{
+		apiKey: string;
+		headers?: Record<string, string>;
+	}> {
+		const result = await this._modelRegistry.getApiKeyAndHeaders(model);
+		if (!result.ok) {
+			throw new Error(result.error);
+		}
+		if (result.apiKey) {
+			return { apiKey: result.apiKey, headers: result.headers };
+		}
+
+		const isOAuth = this._modelRegistry.isUsingOAuth(model);
+		if (isOAuth) {
+			throw new Error(
+				`Authentication failed for "${model.provider}". ` +
+					`Credentials may have expired or network is unavailable. ` +
+					`Run '/login ${model.provider}' to re-authenticate.`,
+			);
+		}
+		throw new Error(
+			`No API key found for ${model.provider}.\n\n` +
+				`Use /login or set an API key environment variable. See ${join(getDocsPath(), "providers.md")}`,
+		);
 	}
 
 	/**
@@ -385,6 +431,14 @@ export class AgentSession {
 		}
 	}
 
+	private _emitQueueUpdate(): void {
+		this._emit({
+			type: "queue_update",
+			steering: [...this._steeringMessages],
+			followUp: [...this._followUpMessages],
+		});
+	}
+
 	// Track last assistant message for auto-compaction check
 	private _lastAssistantMessage: AssistantMessage | undefined = undefined;
 
@@ -409,11 +463,13 @@ export class AgentSession {
 				const steeringIndex = this._steeringMessages.indexOf(messageText);
 				if (steeringIndex !== -1) {
 					this._steeringMessages.splice(steeringIndex, 1);
+					this._emitQueueUpdate();
 				} else {
 					// Check follow-up queue
 					const followUpIndex = this._followUpMessages.indexOf(messageText);
 					if (followUpIndex !== -1) {
 						this._followUpMessages.splice(followUpIndex, 1);
+						this._emitQueueUpdate();
 					}
 				}
 			}
@@ -694,14 +750,19 @@ export class AgentSession {
 	}
 
 	/**
-	 * Get all configured tools with name, description, and parameter schema.
+	 * Get all configured tools with name, description, parameter schema, and source metadata.
 	 */
 	getAllTools(): ToolInfo[] {
-		return Array.from(this._toolRegistry.values()).map((t) => ({
-			name: t.name,
-			description: t.description,
-			parameters: t.parameters,
+		return Array.from(this._toolDefinitions.values()).map(({ definition, sourceInfo }) => ({
+			name: definition.name,
+			description: definition.description,
+			parameters: definition.parameters,
+			sourceInfo,
 		}));
+	}
+
+	getToolDefinition(name: string): ToolDefinition | undefined {
+		return this._toolDefinitions.get(name)?.definition;
 	}
 
 	/**
@@ -918,9 +979,7 @@ export class AgentSession {
 			);
 		}
 
-		// Validate API key
-		const apiKey = await this._modelRegistry.getApiKey(this.model);
-		if (!apiKey) {
+		if (!this._modelRegistry.hasConfiguredAuth(this.model)) {
 			const isOAuth = this._modelRegistry.isUsingOAuth(this.model);
 			if (isOAuth) {
 				throw new Error(
@@ -1111,6 +1170,7 @@ export class AgentSession {
 	 */
 	private async _queueSteer(text: string, images?: ImageContent[]): Promise<void> {
 		this._steeringMessages.push(text);
+		this._emitQueueUpdate();
 		const content: (TextContent | ImageContent)[] = [{ type: "text", text }];
 		if (images) {
 			content.push(...images);
@@ -1127,6 +1187,7 @@ export class AgentSession {
 	 */
 	private async _queueFollowUp(text: string, images?: ImageContent[]): Promise<void> {
 		this._followUpMessages.push(text);
+		this._emitQueueUpdate();
 		const content: (TextContent | ImageContent)[] = [{ type: "text", text }];
 		if (images) {
 			content.push(...images);
@@ -1205,21 +1266,7 @@ export class AgentSession {
 					);
 				}
 
-				const apiKey = await this._modelRegistry.getApiKey(this.model);
-				if (!apiKey) {
-					const isOAuth = this._modelRegistry.isUsingOAuth(this.model);
-					if (isOAuth) {
-						throw new Error(
-							`Authentication failed for "${this.model.provider}". ` +
-								`Credentials may have expired or network is unavailable. ` +
-								`Run '/login ${this.model.provider}' to re-authenticate.`,
-						);
-					}
-					throw new Error(
-						`No API key found for ${this.model.provider}.\n\n` +
-							`Use /login or set an API key environment variable. See ${join(getDocsPath(), "providers.md")}`,
-					);
-				}
+				await this._getRequiredRequestAuth(this.model);
 
 				const lastAssistant = this._findLastAssistantMessage();
 				if (lastAssistant) {
@@ -1327,6 +1374,7 @@ export class AgentSession {
 		this._steeringMessages = [];
 		this._followUpMessages = [];
 		this.agent.clearAllQueues();
+		this._emitQueueUpdate();
 		return { steering, followUp };
 	}
 
@@ -1439,12 +1487,11 @@ export class AgentSession {
 
 	/**
 	 * Set model directly.
-	 * Validates API key, saves to session and settings.
-	 * @throws Error if no API key available for the model
+	 * Validates that auth is configured, saves to session and settings.
+	 * @throws Error if no auth is configured for the model
 	 */
 	async setModel(model: Model<any>): Promise<void> {
-		const apiKey = await this._modelRegistry.getApiKey(model);
-		if (!apiKey) {
+		if (!this._modelRegistry.hasConfiguredAuth(model)) {
 			throw new Error(`No API key for ${model.provider}/${model.id}`);
 		}
 
@@ -1473,30 +1520,12 @@ export class AgentSession {
 		return this._cycleAvailableModel(direction);
 	}
 
-	private async _getScopedModelsWithApiKey(): Promise<Array<{ model: Model<any>; thinkingLevel?: ThinkingLevel }>> {
-		const apiKeysByProvider = new Map<string, string | undefined>();
-		const result: Array<{ model: Model<any>; thinkingLevel?: ThinkingLevel }> = [];
-
-		for (const scoped of this._scopedModels) {
-			const provider = scoped.model.provider;
-			let apiKey: string | undefined;
-			if (apiKeysByProvider.has(provider)) {
-				apiKey = apiKeysByProvider.get(provider);
-			} else {
-				apiKey = await this._modelRegistry.getApiKeyForProvider(provider);
-				apiKeysByProvider.set(provider, apiKey);
-			}
-
-			if (apiKey) {
-				result.push(scoped);
-			}
-		}
-
-		return result;
+	private _getScopedModelsWithAuth(): Array<{ model: Model<any>; thinkingLevel?: ThinkingLevel }> {
+		return this._scopedModels.filter((scoped) => this._modelRegistry.hasConfiguredAuth(scoped.model));
 	}
 
 	private async _cycleScopedModel(direction: "forward" | "backward"): Promise<ModelCycleResult | undefined> {
-		const scopedModels = await this._getScopedModelsWithApiKey();
+		const scopedModels = this._getScopedModelsWithAuth();
 		if (scopedModels.length <= 1) return undefined;
 
 		const currentModel = this.model;
@@ -1535,11 +1564,6 @@ export class AgentSession {
 		const len = availableModels.length;
 		const nextIndex = direction === "forward" ? (currentIndex + 1) % len : (currentIndex - 1 + len) % len;
 		const nextModel = availableModels[nextIndex];
-
-		const apiKey = await this._modelRegistry.getApiKey(nextModel);
-		if (!apiKey) {
-			throw new Error(`No API key for ${nextModel.provider}/${nextModel.id}`);
-		}
 
 		const thinkingLevel = this._getThinkingLevelForModelSwitch();
 		this.agent.setModel(nextModel);
@@ -1682,16 +1706,14 @@ export class AgentSession {
 		this._disconnectFromAgent();
 		await this.abort();
 		this._compactionAbortController = new AbortController();
+		this._emit({ type: "compaction_start", reason: "manual" });
 
 		try {
 			if (!this.model) {
 				throw new Error("No model selected");
 			}
 
-			const apiKey = await this._modelRegistry.getApiKey(this.model);
-			if (!apiKey) {
-				throw new Error(`No API key for ${this.model.provider}`);
-			}
+			const { apiKey, headers } = await this._getRequiredRequestAuth(this.model);
 
 			const pathEntries = this.sessionManager.getBranch();
 			const settings = this.settingsManager.getCompactionSettings();
@@ -1745,6 +1767,7 @@ export class AgentSession {
 					preparation,
 					this.model,
 					apiKey,
+					headers,
 					customInstructions,
 					this._compactionAbortController.signal,
 				);
@@ -1776,12 +1799,32 @@ export class AgentSession {
 				});
 			}
 
-			return {
+			const compactionResult = {
 				summary,
 				firstKeptEntryId,
 				tokensBefore,
 				details,
 			};
+			this._emit({
+				type: "compaction_end",
+				reason: "manual",
+				result: compactionResult,
+				aborted: false,
+				willRetry: false,
+			});
+			return compactionResult;
+		} catch (error) {
+			const message = error instanceof Error ? error.message : String(error);
+			const aborted = message === "Compaction cancelled" || (error instanceof Error && error.name === "AbortError");
+			this._emit({
+				type: "compaction_end",
+				reason: "manual",
+				result: undefined,
+				aborted,
+				willRetry: false,
+				errorMessage: aborted ? undefined : `Compaction failed: ${message}`,
+			});
+			throw error;
 		} finally {
 			this._compactionAbortController = undefined;
 			this._reconnectToAgent();
@@ -1844,7 +1887,8 @@ export class AgentSession {
 		if (sameModel && isContextOverflow(assistantMessage, contextWindow)) {
 			if (this._overflowRecoveryAttempted) {
 				this._emit({
-					type: "auto_compaction_end",
+					type: "compaction_end",
+					reason: "overflow",
 					result: undefined,
 					aborted: false,
 					willRetry: false,
@@ -1899,26 +1943,45 @@ export class AgentSession {
 	private async _runAutoCompaction(reason: "overflow" | "threshold", willRetry: boolean): Promise<void> {
 		const settings = this.settingsManager.getCompactionSettings();
 
-		this._emit({ type: "auto_compaction_start", reason });
+		this._emit({ type: "compaction_start", reason });
 		this._autoCompactionAbortController = new AbortController();
 
 		try {
 			if (!this.model) {
-				this._emit({ type: "auto_compaction_end", result: undefined, aborted: false, willRetry: false });
+				this._emit({
+					type: "compaction_end",
+					reason,
+					result: undefined,
+					aborted: false,
+					willRetry: false,
+				});
 				return;
 			}
 
-			const apiKey = await this._modelRegistry.getApiKey(this.model);
-			if (!apiKey) {
-				this._emit({ type: "auto_compaction_end", result: undefined, aborted: false, willRetry: false });
+			const authResult = await this._modelRegistry.getApiKeyAndHeaders(this.model);
+			if (!authResult.ok || !authResult.apiKey) {
+				this._emit({
+					type: "compaction_end",
+					reason,
+					result: undefined,
+					aborted: false,
+					willRetry: false,
+				});
 				return;
 			}
+			const { apiKey, headers } = authResult;
 
 			const pathEntries = this.sessionManager.getBranch();
 
 			const preparation = prepareCompaction(pathEntries, settings);
 			if (!preparation) {
-				this._emit({ type: "auto_compaction_end", result: undefined, aborted: false, willRetry: false });
+				this._emit({
+					type: "compaction_end",
+					reason,
+					result: undefined,
+					aborted: false,
+					willRetry: false,
+				});
 				return;
 			}
 
@@ -1935,7 +1998,13 @@ export class AgentSession {
 				})) as SessionBeforeCompactResult | undefined;
 
 				if (extensionResult?.cancel) {
-					this._emit({ type: "auto_compaction_end", result: undefined, aborted: true, willRetry: false });
+					this._emit({
+						type: "compaction_end",
+						reason,
+						result: undefined,
+						aborted: true,
+						willRetry: false,
+					});
 					return;
 				}
 
@@ -1962,6 +2031,7 @@ export class AgentSession {
 					preparation,
 					this.model,
 					apiKey,
+					headers,
 					undefined,
 					this._autoCompactionAbortController.signal,
 				);
@@ -1972,7 +2042,13 @@ export class AgentSession {
 			}
 
 			if (this._autoCompactionAbortController.signal.aborted) {
-				this._emit({ type: "auto_compaction_end", result: undefined, aborted: true, willRetry: false });
+				this._emit({
+					type: "compaction_end",
+					reason,
+					result: undefined,
+					aborted: true,
+					willRetry: false,
+				});
 				return;
 			}
 
@@ -2000,7 +2076,7 @@ export class AgentSession {
 				tokensBefore,
 				details,
 			};
-			this._emit({ type: "auto_compaction_end", result, aborted: false, willRetry });
+			this._emit({ type: "compaction_end", reason, result, aborted: false, willRetry });
 
 			if (willRetry) {
 				const messages = this.agent.state.messages;
@@ -2018,7 +2094,8 @@ export class AgentSession {
 		} catch (error) {
 			const errorMessage = error instanceof Error ? error.message : "compaction failed";
 			this._emit({
-				type: "auto_compaction_end",
+				type: "compaction_end",
+				reason,
 				result: undefined,
 				aborted: false,
 				willRetry: false,
@@ -2143,40 +2220,26 @@ export class AgentSession {
 	}
 
 	private _bindExtensionCore(runner: ExtensionRunner): void {
-		const normalizeLocation = (source: string): SlashCommandLocation | undefined => {
-			if (source === "user" || source === "project" || source === "path") {
-				return source;
-			}
-			return undefined;
-		};
-
-		const reservedBuiltins = new Set(BUILTIN_SLASH_COMMANDS.map((command) => command.name));
-
 		const getCommands = (): SlashCommandInfo[] => {
-			const extensionCommands: SlashCommandInfo[] = runner
-				.getRegisteredCommandsWithPaths()
-				.filter(({ command }) => !reservedBuiltins.has(command.name))
-				.map(({ command, extensionPath }) => ({
-					name: command.name,
-					description: command.description,
-					source: "extension",
-					path: extensionPath,
-				}));
+			const extensionCommands: SlashCommandInfo[] = runner.getRegisteredCommands().map((command) => ({
+				name: command.invocationName,
+				description: command.description,
+				source: "extension",
+				sourceInfo: command.sourceInfo,
+			}));
 
 			const templates: SlashCommandInfo[] = this.promptTemplates.map((template) => ({
 				name: template.name,
 				description: template.description,
 				source: "prompt",
-				location: normalizeLocation(template.source),
-				path: template.filePath,
+				sourceInfo: template.sourceInfo,
 			}));
 
 			const skills: SlashCommandInfo[] = this._resourceLoader.getSkills().skills.map((skill) => ({
 				name: `skill:${skill.name}`,
 				description: skill.description,
 				source: "skill",
-				location: normalizeLocation(skill.source),
-				path: skill.filePath,
+				sourceInfo: skill.sourceInfo,
 			}));
 
 			return [...extensionCommands, ...templates, ...skills];
@@ -2220,8 +2283,7 @@ export class AgentSession {
 				refreshTools: () => this._refreshToolRegistry(),
 				getCommands,
 				setModel: async (model) => {
-					const key = await this.modelRegistry.getApiKey(model);
-					if (!key) return false;
+					if (!this.modelRegistry.hasConfiguredAuth(model)) return false;
 					await this.setModel(model);
 					return true;
 				},
@@ -2232,6 +2294,7 @@ export class AgentSession {
 			{
 				getModel: () => this.model,
 				isIdle: () => !this.isStreaming,
+				getSignal: () => this.agent.signal,
 				abort: () => this.abort(),
 				hasPendingMessages: () => this.pendingMessageCount > 0,
 				shutdown: () => {
@@ -2271,21 +2334,40 @@ export class AgentSession {
 		const registeredTools = this._extensionRunner?.getAllRegisteredTools() ?? [];
 		const allCustomTools = [
 			...registeredTools,
-			...this._customTools.map((def) => ({ definition: def, extensionPath: "<sdk>" })),
+			...this._customTools.map((definition) => ({
+				definition,
+				sourceInfo: createSyntheticSourceInfo(`<sdk:${definition.name}>`, { source: "sdk" }),
+			})),
 		];
+		const definitionRegistry = new Map<string, ToolDefinitionEntry>(
+			Array.from(this._baseToolDefinitions.entries()).map(([name, definition]) => [
+				name,
+				{
+					definition,
+					sourceInfo: createSyntheticSourceInfo(`<builtin:${name}>`, { source: "builtin" }),
+				},
+			]),
+		);
+		for (const tool of allCustomTools) {
+			definitionRegistry.set(tool.definition.name, {
+				definition: tool.definition,
+				sourceInfo: tool.sourceInfo,
+			});
+		}
+		this._toolDefinitions = definitionRegistry;
 		this._toolPromptSnippets = new Map(
-			allCustomTools
-				.map((registeredTool) => {
-					const snippet = this._normalizePromptSnippet(registeredTool.definition.promptSnippet);
-					return snippet ? ([registeredTool.definition.name, snippet] as const) : undefined;
+			Array.from(definitionRegistry.values())
+				.map(({ definition }) => {
+					const snippet = this._normalizePromptSnippet(definition.promptSnippet);
+					return snippet ? ([definition.name, snippet] as const) : undefined;
 				})
 				.filter((entry): entry is readonly [string, string] => entry !== undefined),
 		);
 		this._toolPromptGuidelines = new Map(
-			allCustomTools
-				.map((registeredTool) => {
-					const guidelines = this._normalizePromptGuidelines(registeredTool.definition.promptGuidelines);
-					return guidelines.length > 0 ? ([registeredTool.definition.name, guidelines] as const) : undefined;
+			Array.from(definitionRegistry.values())
+				.map(({ definition }) => {
+					const guidelines = this._normalizePromptGuidelines(definition.promptGuidelines);
+					return guidelines.length > 0 ? ([definition.name, guidelines] as const) : undefined;
 				})
 				.filter((entry): entry is readonly [string, string[]] => entry !== undefined),
 		);
@@ -2293,7 +2375,12 @@ export class AgentSession {
 			? wrapRegisteredTools(allCustomTools, this._extensionRunner)
 			: [];
 
-		const toolRegistry = new Map(this._baseToolRegistry);
+		const toolRegistry = new Map(
+			Array.from(this._baseToolDefinitions.values()).map((definition) => [
+				definition.name,
+				wrapToolDefinition(definition),
+			]),
+		);
 		for (const tool of wrappedExtensionTools as AgentTool[]) {
 			toolRegistry.set(tool.name, tool);
 		}
@@ -2325,14 +2412,21 @@ export class AgentSession {
 	}): void {
 		const autoResizeImages = this.settingsManager.getImageAutoResize();
 		const shellCommandPrefix = this.settingsManager.getShellCommandPrefix();
-		const baseTools = this._baseToolsOverride
-			? this._baseToolsOverride
-			: createAllTools(this._cwd, {
+		const baseToolDefinitions = this._baseToolsOverride
+			? Object.fromEntries(
+					Object.entries(this._baseToolsOverride).map(([name, tool]) => [
+						name,
+						createToolDefinitionFromAgentTool(tool),
+					]),
+				)
+			: createAllToolDefinitions(this._cwd, {
 					read: { autoResizeImages },
 					bash: { commandPrefix: shellCommandPrefix },
 				});
 
-		this._baseToolRegistry = new Map(Object.entries(baseTools).map(([name, tool]) => [name, tool as AgentTool]));
+		this._baseToolDefinitions = new Map(
+			Object.entries(baseToolDefinitions).map(([name, tool]) => [name, tool as ToolDefinition]),
+		);
 
 		const extensionsResult = this._resourceLoader.getExtensions();
 		if (options.flagValues) {
@@ -2882,14 +2976,12 @@ export class AgentSession {
 		let summaryDetails: unknown;
 		if (options.summarize && entriesToSummarize.length > 0 && !extensionSummary) {
 			const model = this.model!;
-			const apiKey = await this._modelRegistry.getApiKey(model);
-			if (!apiKey) {
-				throw new Error(`No API key for ${model.provider}`);
-			}
+			const { apiKey, headers } = await this._getRequiredRequestAuth(model);
 			const branchSummarySettings = this.settingsManager.getBranchSummarySettings();
 			const result = await generateBranchSummary(entriesToSummarize, {
 				model,
 				apiKey,
+				headers,
 				signal: this._branchSummaryAbortController.signal,
 				customInstructions,
 				replaceInstructions,
@@ -3056,6 +3148,7 @@ export class AgentSession {
 				total: totalInput + totalOutput + totalCacheRead + totalCacheWrite,
 			},
 			cost: totalCost,
+			contextUsage: this.getContextUsage(),
 		};
 	}
 
@@ -3114,13 +3207,10 @@ export class AgentSession {
 		const themeName = this.settingsManager.getTheme();
 
 		// Create tool renderer if we have an extension runner (for custom tool HTML rendering)
-		let toolRenderer: ToolHtmlRenderer | undefined;
-		if (this._extensionRunner) {
-			toolRenderer = createToolHtmlRenderer({
-				getToolDefinition: (name) => this._extensionRunner!.getToolDefinition(name),
-				theme,
-			});
-		}
+		const toolRenderer: ToolHtmlRenderer = createToolHtmlRenderer({
+			getToolDefinition: (name) => this.getToolDefinition(name),
+			theme,
+		});
 
 		return await exportSessionToHtml(this.sessionManager, this.state, {
 			outputPath,

@@ -494,7 +494,7 @@ Response:
 
 #### get_session_stats
 
-Get token usage and cost statistics.
+Get token usage, cost statistics, and current context window usage.
 
 ```json
 {"type": "get_session_stats"}
@@ -521,10 +521,19 @@ Response:
       "cacheWrite": 5000,
       "total": 105000
     },
-    "cost": 0.45
+    "cost": 0.45,
+    "contextUsage": {
+      "tokens": 60000,
+      "contextWindow": 200000,
+      "percent": 30
+    }
   }
 }
 ```
+
+`tokens` contains assistant usage totals for the current session state. `contextUsage` contains the actual current context-window estimate used for compaction and footer display.
+
+`contextUsage` is omitted when no model or context window is available. `contextUsage.tokens` and `contextUsage.percent` are `null` immediately after compaction until a fresh post-compaction assistant response provides valid usage data.
 
 #### export_html
 
@@ -716,8 +725,9 @@ Events are streamed to stdout as JSON lines during agent operation. Events do NO
 | `tool_execution_start` | Tool begins execution |
 | `tool_execution_update` | Tool execution progress (streaming output) |
 | `tool_execution_end` | Tool completes |
-| `auto_compaction_start` | Auto-compaction begins |
-| `auto_compaction_end` | Auto-compaction completes |
+| `queue_update` | Pending steering/follow-up queue changed |
+| `compaction_start` | Compaction begins |
+| `compaction_end` | Compaction completes |
 | `auto_retry_start` | Auto-retry begins (after transient error) |
 | `auto_retry_end` | Auto-retry completes (success or final failure) |
 | `extension_error` | Extension threw an error |
@@ -853,19 +863,32 @@ When complete:
 
 Use `toolCallId` to correlate events. The `partialResult` in `tool_execution_update` contains the accumulated output so far (not just the delta), allowing clients to simply replace their display on each update.
 
-### auto_compaction_start / auto_compaction_end
+### queue_update
 
-Emitted when automatic compaction runs (when context is nearly full).
-
-```json
-{"type": "auto_compaction_start", "reason": "threshold"}
-```
-
-The `reason` field is `"threshold"` (context getting large) or `"overflow"` (context exceeded limit).
+Emitted whenever the pending steering or follow-up queue changes.
 
 ```json
 {
-  "type": "auto_compaction_end",
+  "type": "queue_update",
+  "steering": ["Focus on error handling"],
+  "followUp": ["After that, summarize the result"]
+}
+```
+
+### compaction_start / compaction_end
+
+Emitted when compaction runs, whether manual or automatic.
+
+```json
+{"type": "compaction_start", "reason": "threshold"}
+```
+
+The `reason` field is `"manual"`, `"threshold"`, or `"overflow"`.
+
+```json
+{
+  "type": "compaction_end",
+  "reason": "threshold",
   "result": {
     "summary": "Summary of conversation...",
     "firstKeptEntryId": "abc123",
