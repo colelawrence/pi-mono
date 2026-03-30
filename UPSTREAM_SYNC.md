@@ -74,6 +74,36 @@ cd packages/tui
 node --test --import tsx test/tui-render.test.ts
 ```
 
+### `packages/coding-agent/src/core/agent-session.ts`, `packages/coding-agent/src/core/session-runtime.ts`, `packages/coding-agent/src/core/user-turn-ready.ts`
+Intent:
+- Keep the downstream epi session-runtime bridge integrated with AgentSession lifecycle changes.
+- Preserve downstream `epi_user_turn_ready` emission without forking upstream turn/session control flow more than necessary.
+
+Resolution pattern:
+- Prefer upstream AgentSession structure and control flow.
+- Keep downstream behavior concentrated in additive runtime helpers and narrowly-scoped hooks instead of broad inline rewrites.
+- If upstream exposes a cleaner seam, move this carry out of `agent-session.ts`.
+
+Verification:
+```bash
+cd packages/coding-agent
+npx vitest --run test/user-turn-ready.test.ts test/agent-session-runtime-invariants.test.ts test/trigger-compact-extension.test.ts
+```
+
+### `packages/coding-agent/src/core/extensions/loader.ts`, `packages/coding-agent/src/core/extensions/host-capabilities.ts`
+Intent:
+- Expose downstream host capabilities (currently `epiUserTurnReadyV1`) to extensions alongside upstream loader/source-info behavior.
+
+Resolution pattern:
+- Prefer upstream loader/runtime initialization flow.
+- Reapply downstream capability exposure as small additive accessors and constants, not a loader refactor.
+
+Verification:
+```bash
+cd packages/coding-agent
+npx vitest --run test/host-capabilities.test.ts
+```
+
 ## Generated file policy
 
 ### `packages/ai/src/models.generated.ts`
@@ -214,3 +244,24 @@ If a sync exposed a recurring conflict pattern, confusing decision point, or bet
   - repeated friction: package-manager state lives outside the git worktree; temporary sync worktrees need shared `node_modules` symlinks before verification
   - next carry to reduce: move `epi_user_turn_ready` and epi runtime exposure farther out of `agent-session.ts` if a cleaner extension/session seam becomes available
   - process update: when the primary checkout is dirty, prefer a temporary sync worktree immediately instead of discovering that constraint mid-merge
+
+## Sync 2026-03-30
+- merged: `upstream/main @ 5e3852fc`
+- branch: `sync/upstream-2026-03-30`
+- conflicts:
+  - `packages/agent/package.json`, `packages/coding-agent/package.json`, `package-lock.json` — updated to upstream `0.64.0` package versions while preserving downstream-required dependencies (`@sinclair/typebox`, `@opentelemetry/api`)
+- verification:
+  - [x] `cd packages/tui && node --test --import tsx test/tui-render.test.ts`
+  - [x] `cd packages/agent && npm run build`
+  - [x] `cd packages/coding-agent && npx vitest --run test/host-capabilities.test.ts test/trigger-compact-extension.test.ts`
+  - [x] `cd packages/coding-agent && npx vitest --run test/user-turn-ready.test.ts test/agent-session-runtime-invariants.test.ts`
+  - [x] `./install-epi.sh`
+- notes:
+  - current carry patches still expected: `packages/tui/src/tui.ts` for loud-but-non-fatal render failures/overwide lines, `packages/coding-agent/src/core/agent-session.ts` / `session-runtime.ts` / `user-turn-ready.ts` for epi runtime + turn-ready integration, and `packages/coding-agent/src/core/extensions/loader.ts` / `host-capabilities.ts` for downstream host-capability exposure
+  - `packages/ai/src/models.generated.ts` was regenerated during `./install-epi.sh`, but that incidental generated churn was dropped from the sync branch instead of being committed as part of the merge
+  - the temporary sync worktree needed its own `npm install`; a shared `node_modules` symlink reused workspace links from the primary checkout and surfaced stale package outputs during verification
+- reflection:
+  - surprisingly easy: upstream `0.64.0` landed with only package manifest / lockfile conflicts against the current downstream carry set
+  - repeated friction: temporary worktrees can inherit misleading workspace symlinks when they borrow another checkout’s `node_modules`
+  - next carry to reduce: move `epi_user_turn_ready` and epi runtime exposure farther out of `agent-session.ts` if a cleaner extension/session seam becomes available
+  - process update: when a temporary sync worktree needs package-manager state, prefer a local `npm install` in that worktree over a shared `node_modules` symlink if workspace package links matter for build/test correctness
