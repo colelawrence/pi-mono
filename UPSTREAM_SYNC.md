@@ -26,8 +26,24 @@ git merge upstream/main
 
 git switch effect-native-core
 git merge sync/upstream-YYYY-MM-DD
+# if you used a temporary worktree for the merge, fast-forward the primary
+# .references/pi-mono-effect checkout to the completed sync branch too
+# clean only known incidental generated/build dirt in the primary checkout
+# so the checked-out ref repo is the thing future reads/builds use
 git push origin effect-native-core
 ```
+
+## Primary checkout hygiene
+
+Treat the checked-out `.references/pi-mono-effect` worktree as the canonical local reference repo.
+If you need a temporary worktree for the merge, that is a means to complete the sync — not the final place to leave the repo.
+
+Rules:
+- Check `git status --short` in the primary checkout before starting.
+- If the primary checkout is dirty and the dirt is not obviously disposable generated output, do the merge in a temporary worktree instead of forcing cleanup.
+- Do **not** use blanket destructive cleanup (`git reset --hard`, `git checkout --`, `git clean -fd`, `git stash`) just to make a sync easier.
+- Before calling the sync done, return to the primary `.references/pi-mono-effect` checkout, fast-forward it to the completed sync branch, and remove only the specific incidental generated/build dirt you intentionally created and understand.
+- If you cannot explain each remaining dirty path in the primary checkout, the sync is not done.
 
 Why merge instead of rebase:
 - preserves shared history
@@ -203,6 +219,7 @@ At the end of every sync, do a short retrospective before calling the branch don
 - record whether generated files needed regeneration and whether that churn was kept or dropped
 - capture one or two lessons that would make the next sync easier
 - feed those lessons back into this file immediately rather than relying on memory
+- ensure the primary `.references/pi-mono-effect` checkout, not just a temporary worktree, is updated to the finished sync commit and left in an explained state
 
 If a sync exposed a recurring conflict pattern, confusing decision point, or better resolution rule, update the living guidance in this document during the same sync.
 
