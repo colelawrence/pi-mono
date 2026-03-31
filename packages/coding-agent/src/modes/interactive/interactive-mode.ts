@@ -188,6 +188,9 @@ export class InteractiveMode {
 	// Thinking block visibility state
 	private hideThinkingBlock = false;
 
+	// Reveal custom messages delivered to the agent with display:false
+	private showHiddenCustomMessages = false;
+
 	// Skill commands: command name -> skill file path
 	private skillCommands = new Map<string, string>();
 
@@ -281,8 +284,9 @@ export class InteractiveMode {
 		this.footer = new FooterComponent(session, this.footerDataProvider);
 		this.footer.setAutoCompactEnabled(session.autoCompactionEnabled);
 
-		// Load hide thinking block setting
+		// Load transcript visibility settings
 		this.hideThinkingBlock = this.settingsManager.getHideThinkingBlock();
+		this.showHiddenCustomMessages = this.settingsManager.getShowHiddenCustomMessages();
 
 		// Register themes from resource loader and initialize
 		setRegisteredThemes(this.session.resourceLoader.getThemes().themes);
@@ -454,6 +458,7 @@ export class InteractiveMode {
 				hint("app.model.select", "to select model"),
 				hint("app.tools.expand", "to expand tools"),
 				hint("app.thinking.toggle", "to expand thinking"),
+				hint("app.customMessages.toggleHidden", "to show hidden custom messages"),
 				hint("app.editor.external", "for external editor"),
 				rawKeyHint("/", "for commands"),
 				rawKeyHint("!", "to run bash"),
@@ -2001,6 +2006,7 @@ export class InteractiveMode {
 		this.defaultEditor.onAction("app.model.select", () => this.showModelSelector());
 		this.defaultEditor.onAction("app.tools.expand", () => this.toggleToolOutputExpansion());
 		this.defaultEditor.onAction("app.thinking.toggle", () => this.toggleThinkingBlockVisibility());
+		this.defaultEditor.onAction("app.customMessages.toggleHidden", () => this.toggleHiddenCustomMessages());
 		this.defaultEditor.onAction("app.editor.external", () => this.openExternalEditor());
 		this.defaultEditor.onAction("app.message.followUp", () => this.handleFollowUp());
 		this.defaultEditor.onAction("app.message.dequeue", () => this.handleDequeue());
@@ -2578,9 +2584,14 @@ export class InteractiveMode {
 				break;
 			}
 			case "custom": {
-				if (message.display) {
+				if (message.display || this.showHiddenCustomMessages) {
 					const renderer = this.session.extensionRunner?.getMessageRenderer(message.customType);
-					const component = new CustomMessageComponent(message, renderer, this.getMarkdownThemeWithSettings());
+					const component = new CustomMessageComponent(
+						message,
+						renderer,
+						this.getMarkdownThemeWithSettings(),
+						!message.display,
+					);
 					component.setExpanded(this.toolOutputExpanded);
 					this.chatContainer.addChild(component);
 				}
@@ -2750,6 +2761,19 @@ export class InteractiveMode {
 		this.chatContainer.clear();
 		const context = this.sessionManager.buildSessionContext();
 		this.renderSessionContext(context);
+	}
+
+	private rebuildTranscriptProjection(): void {
+		this.chatContainer.clear();
+		this.rebuildChatFromMessages();
+
+		if (this.streamingComponent && this.streamingMessage) {
+			this.streamingComponent.setHideThinkingBlock(this.hideThinkingBlock);
+			this.streamingComponent.updateContent(this.streamingMessage);
+			this.chatContainer.addChild(this.streamingComponent);
+		}
+
+		this.ui.requestRender();
 	}
 
 	// =========================================================================
@@ -2937,19 +2961,15 @@ export class InteractiveMode {
 	private toggleThinkingBlockVisibility(): void {
 		this.hideThinkingBlock = !this.hideThinkingBlock;
 		this.settingsManager.setHideThinkingBlock(this.hideThinkingBlock);
-
-		// Rebuild chat from session messages
-		this.chatContainer.clear();
-		this.rebuildChatFromMessages();
-
-		// If streaming, re-add the streaming component with updated visibility and re-render
-		if (this.streamingComponent && this.streamingMessage) {
-			this.streamingComponent.setHideThinkingBlock(this.hideThinkingBlock);
-			this.streamingComponent.updateContent(this.streamingMessage);
-			this.chatContainer.addChild(this.streamingComponent);
-		}
-
+		this.rebuildTranscriptProjection();
 		this.showStatus(`Thinking blocks: ${this.hideThinkingBlock ? "hidden" : "visible"}`);
+	}
+
+	private toggleHiddenCustomMessages(): void {
+		this.showHiddenCustomMessages = !this.showHiddenCustomMessages;
+		this.settingsManager.setShowHiddenCustomMessages(this.showHiddenCustomMessages);
+		this.rebuildTranscriptProjection();
+		this.showStatus(`Hidden custom messages: ${this.showHiddenCustomMessages ? "visible" : "hidden"}`);
 	}
 
 	private openExternalEditor(): void {
@@ -3280,6 +3300,7 @@ export class InteractiveMode {
 					currentTheme: this.settingsManager.getTheme() || "dark",
 					availableThemes: getAvailableThemes(),
 					hideThinkingBlock: this.hideThinkingBlock,
+					showHiddenCustomMessages: this.showHiddenCustomMessages,
 					collapseChangelog: this.settingsManager.getCollapseChangelog(),
 					doubleEscapeAction: this.settingsManager.getDoubleEscapeAction(),
 					treeFilterMode: this.settingsManager.getTreeFilterMode(),
@@ -3345,13 +3366,12 @@ export class InteractiveMode {
 					onHideThinkingBlockChange: (hidden) => {
 						this.hideThinkingBlock = hidden;
 						this.settingsManager.setHideThinkingBlock(hidden);
-						for (const child of this.chatContainer.children) {
-							if (child instanceof AssistantMessageComponent) {
-								child.setHideThinkingBlock(hidden);
-							}
-						}
-						this.chatContainer.clear();
-						this.rebuildChatFromMessages();
+						this.rebuildTranscriptProjection();
+					},
+					onShowHiddenCustomMessagesChange: (show) => {
+						this.showHiddenCustomMessages = show;
+						this.settingsManager.setShowHiddenCustomMessages(show);
+						this.rebuildTranscriptProjection();
 					},
 					onCollapseChangelogChange: (collapsed) => {
 						this.settingsManager.setCollapseChangelog(collapsed);
@@ -3995,6 +4015,7 @@ export class InteractiveMode {
 			this.keybindings.reload();
 			setRegisteredThemes(this.session.resourceLoader.getThemes().themes);
 			this.hideThinkingBlock = this.settingsManager.getHideThinkingBlock();
+			this.showHiddenCustomMessages = this.settingsManager.getShowHiddenCustomMessages();
 			const themeName = this.settingsManager.getTheme();
 			const themeResult = themeName ? setTheme(themeName, true) : { success: true };
 			if (!themeResult.success) {

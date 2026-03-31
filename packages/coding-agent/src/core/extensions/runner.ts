@@ -69,6 +69,7 @@ const RESERVED_KEYBINDINGS_FOR_EXTENSION_CONFLICTS = [
 	"app.model.select",
 	"app.tools.expand",
 	"app.thinking.toggle",
+	"app.customMessages.toggleHidden",
 	"app.editor.external",
 	"app.message.followUp",
 	"tui.input.submit",

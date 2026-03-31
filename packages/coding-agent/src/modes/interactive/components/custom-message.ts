@@ -16,16 +16,19 @@ export class CustomMessageComponent extends Container {
 	private customComponent?: Component;
 	private markdownTheme: MarkdownTheme;
 	private _expanded = false;
+	private revealedHidden = false;
 
 	constructor(
 		message: CustomMessage<unknown>,
 		customRenderer?: MessageRenderer,
 		markdownTheme: MarkdownTheme = getMarkdownTheme(),
+		revealedHidden = false,
 	) {
 		super();
 		this.message = message;
 		this.customRenderer = customRenderer;
 		this.markdownTheme = markdownTheme;
+		this.revealedHidden = revealedHidden;
 
 		this.addChild(new Spacer(1));
 
@@ -55,8 +58,10 @@ export class CustomMessageComponent extends Container {
 		}
 		this.removeChild(this.box);
 
-		// Try custom renderer first - it handles its own styling
-		if (this.customRenderer) {
+		// Try custom renderer first - it handles its own styling.
+		// Revealed hidden messages intentionally use the default renderer so the
+		// transcript can clearly show that they were delivered with display:false.
+		if (this.customRenderer && !this.revealedHidden) {
 			try {
 				const component = this.customRenderer(this.message, { expanded: this._expanded }, theme);
 				if (component) {
@@ -71,13 +76,23 @@ export class CustomMessageComponent extends Container {
 		}
 
 		// Default rendering uses our box
+		this.box.setBgFn(
+			this.revealedHidden ? (t) => theme.bg("toolPendingBg", t) : (t) => theme.bg("customMessageBg", t),
+		);
 		this.addChild(this.box);
 		this.box.clear();
 
 		// Default rendering: label + content
-		const label = theme.fg("customMessageLabel", `\x1b[1m[${this.message.customType}]\x1b[22m`);
+		const label = this.revealedHidden
+			? theme.fg("warning", `\x1b[1m[${this.message.customType} · hidden from transcript]\x1b[22m`)
+			: theme.fg("customMessageLabel", `\x1b[1m[${this.message.customType}]\x1b[22m`);
 		this.box.addChild(new Text(label, 0, 0));
 		this.box.addChild(new Spacer(1));
+
+		if (this.revealedHidden) {
+			this.box.addChild(new Text(theme.fg("dim", "Delivered to the agent with display:false."), 0, 0));
+			this.box.addChild(new Spacer(1));
+		}
 
 		// Extract text content
 		let text: string;

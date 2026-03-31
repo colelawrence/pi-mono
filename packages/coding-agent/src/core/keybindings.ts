@@ -21,6 +21,7 @@ export interface AppKeybindings {
 	"app.model.select": true;
 	"app.tools.expand": true;
 	"app.thinking.toggle": true;
+	"app.customMessages.toggleHidden": true;
 	"app.session.toggleNamedFilter": true;
 	"app.editor.external": true;
 	"app.message.followUp": true;
@@ -68,6 +69,10 @@ export const KEYBINDINGS = {
 	"app.thinking.toggle": {
 		defaultKeys: "ctrl+t",
 		description: "Toggle thinking blocks",
+	},
+	"app.customMessages.toggleHidden": {
+		defaultKeys: "ctrl+shift+s",
+		description: "Toggle hidden custom messages",
 	},
 	"app.session.toggleNamedFilter": {
 		defaultKeys: "ctrl+n",
