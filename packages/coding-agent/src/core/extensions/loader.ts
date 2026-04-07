@@ -114,6 +114,29 @@ function resolvePath(extPath: string, cwd: string): string {
 
 type HandlerFn = (...args: unknown[]) => Promise<unknown>;
 
+const PI_EXTENSION_LAYER_SYMBOL = Symbol.for("pi-sdk-effect-adapter/PiExtensionLayer");
+
+type LoadedLayerDescriptor = ExtensionFactory & {
+	readonly [PI_EXTENSION_LAYER_SYMBOL]?: {
+		readonly id?: string;
+		readonly layer?: unknown;
+	};
+};
+
+type LoadedExtensionModule =
+	| { kind: "factory"; factory: ExtensionFactory }
+	| { kind: "layer"; descriptor: LoadedLayerDescriptor }
+	| { kind: "invalid" };
+
+type LayeredExtensionCandidate = {
+	extensionPath: string;
+	resolvedPath: string;
+	extension: Extension;
+	api: ExtensionAPI;
+	id?: string;
+	layer: unknown;
+};
+
 /**
  * Create a runtime with throwing stubs for action methods.
  * Runner.bindCore() replaces these with real implementations.
@@ -295,7 +318,7 @@ function createExtensionAPI(
 	return api;
 }
 
-async function loadExtensionModule(extensionPath: string) {
+async function loadExtensionModule(extensionPath: string): Promise<LoadedExtensionModule> {
 	const jiti = createJiti(import.meta.url, {
 		moduleCache: false,
 		// In Bun binary: use virtualModules for bundled packages (no filesystem resolution)
@@ -304,9 +327,23 @@ async function loadExtensionModule(extensionPath: string) {
 		...(isBunBinary ? { virtualModules: VIRTUAL_MODULES, tryNative: false } : { alias: getAliases() }),
 	});
 
-	const module = await jiti.import(extensionPath, { default: true });
-	const factory = module as ExtensionFactory;
-	return typeof factory !== "function" ? undefined : factory;
+	const exported = (await jiti.import(extensionPath, { default: true })) as unknown;
+	if (typeof exported !== "function") {
+		return { kind: "invalid" };
+	}
+
+	const descriptor = exported as ExtensionFactory & {
+		readonly [PI_EXTENSION_LAYER_SYMBOL]?: {
+			readonly id?: string;
+			readonly layer?: unknown;
+		};
+	};
+	const meta = descriptor[PI_EXTENSION_LAYER_SYMBOL];
+	if (meta && typeof meta === "object" && "layer" in meta) {
+		return { kind: "layer", descriptor };
+	}
+
+	return { kind: "factory", factory: exported as ExtensionFactory };
 }
 
 /**
@@ -332,28 +369,177 @@ function createExtension(extensionPath: string, resolvedPath: string): Extension
 	};
 }
 
+/**
+ * Build all piExtensionLayer descriptors as one shared Effect scope.
+ *
+ * Loader owns the descriptor path: it never calls the descriptor function itself.
+ * Instead it provides ExtensionSetup, lets the layers register into ordinary
+ * Extension objects, and closes the shared scope once per generation on session_shutdown.
+ */
+async function buildLayeredExtensionStack(
+	candidates: LayeredExtensionCandidate[],
+): Promise<{ extensions: Extension[]; teardownExtension: Extension | null; errors: Array<{ path: string; error: string }> }> {
+	const duplicateErrors = new Map<string, string>();
+	const ids = new Map<string, string>();
+	for (const candidate of candidates) {
+		const id = candidate.id?.trim();
+		if (!id) continue;
+		const previousPath = ids.get(id);
+		if (previousPath) {
+			const message = `Duplicate piExtensionLayer id "${id}" detected for ${previousPath} and ${candidate.extensionPath}. Layered extension ids must be unique within one load.`;
+			duplicateErrors.set(`${previousPath}:${id}`, message);
+			duplicateErrors.set(`${candidate.extensionPath}:${id}`, message);
+			continue;
+		}
+		ids.set(id, candidate.extensionPath);
+	}
+	if (duplicateErrors.size > 0) {
+		return {
+			extensions: [],
+			teardownExtension: null,
+			errors: Array.from(duplicateErrors.entries()).map(([key, error]) => ({
+				path: key.slice(0, key.lastIndexOf(":")),
+				error,
+			})),
+		};
+	}
+
+	let rootScope: any | null = null;
+	let closePromise: Promise<void> | null = null;
+	let effectApi: { Effect: any; Exit: any; Layer: any; Scope: any } | null = null;
+	try {
+		const extensionJiti = createJiti(candidates[0]!.resolvedPath, {
+			moduleCache: false,
+			...(isBunBinary ? { virtualModules: VIRTUAL_MODULES, tryNative: false } : { alias: getAliases() }),
+		});
+		const [{ Effect, Exit, Layer, Scope }, adapter] = await Promise.all([
+			extensionJiti.import("effect"),
+			extensionJiti.import("@phosphor/pi-sdk-effect-adapter"),
+		]);
+		effectApi = { Effect, Exit, Layer, Scope };
+		const { ExtensionSetup, onEffect, registerCommandEffect, registerToolEffect } = adapter as Record<string, any>;
+		if (
+			typeof onEffect !== "function" ||
+			typeof registerCommandEffect !== "function" ||
+			typeof registerToolEffect !== "function" ||
+			!ExtensionSetup
+		) {
+			throw new Error(
+				"Layered extensions require the workspace @phosphor/pi-sdk-effect-adapter exports ExtensionSetup, onEffect, registerCommandEffect, and registerToolEffect. The patched pi runtime is missing or using an outdated adapter.",
+			);
+		}
+
+		rootScope = await Effect.runPromise(Scope.make());
+		const closeRootScope = (): Promise<void> => {
+			if (!closePromise) {
+				closePromise = Effect.runPromise(Scope.close(rootScope, Exit.void));
+			}
+			return closePromise;
+		};
+
+		const layers = candidates.map((candidate) => {
+			const setupService = {
+				pi: candidate.api,
+				on: (event: string, handler: any, options?: any) =>
+					Effect.sync(() => {
+						onEffect(candidate.api, event, handler, options);
+					}),
+				command: (name: string, options: any) =>
+					Effect.sync(() => {
+						registerCommandEffect(candidate.api, name, options);
+					}),
+				tool: (tool: any) =>
+					Effect.sync(() => {
+						registerToolEffect(candidate.api, tool);
+					}),
+			};
+			return (candidate.layer as any).pipe(Layer.provide(Layer.succeed(ExtensionSetup, setupService)));
+		});
+		const mergedLayer = layers.length === 1 ? layers[0] : Layer.mergeAll(...(layers as [any, ...Array<any>]));
+		await Effect.runPromise(Layer.buildWithScope(rootScope)(mergedLayer));
+
+		const teardownExtension = createExtension("<layered-extension-stack>", "<layered-extension-stack>");
+		// Keep scope teardown under loader ownership. Append this synthetic extension last
+		// and rely on ExtensionRunner.emit iterating extensions in insertion order so
+		// layered session_shutdown handlers run before the shared scope closes.
+		teardownExtension.handlers.set("session_shutdown", [() => closeRootScope()]);
+
+		return {
+			extensions: candidates.map((candidate) => candidate.extension),
+			teardownExtension,
+			errors: [],
+		};
+	} catch (err) {
+		if (rootScope && effectApi) {
+			const closeRootScope = (): Promise<void> => {
+				if (!closePromise) {
+					closePromise = effectApi.Effect.runPromise(effectApi.Scope.close(rootScope, effectApi.Exit.void));
+				}
+				return closePromise;
+			};
+			await closeRootScope();
+		}
+		const message = err instanceof Error ? err.message : String(err);
+		return {
+			extensions: [],
+			teardownExtension: null,
+			errors: candidates.map((candidate) => ({
+				path: candidate.extensionPath,
+				error: `Failed to initialize layered extension stack${candidate.id ? ` (${candidate.id})` : ""}: ${message}`,
+			})),
+		};
+	}
+}
+
 async function loadExtension(
 	extensionPath: string,
 	cwd: string,
 	eventBus: EventBus,
 	runtime: ExtensionRuntime,
-): Promise<{ extension: Extension | null; error: string | null }> {
+): Promise<{ extension: Extension | null; layeredCandidate: LayeredExtensionCandidate | null; error: string | null }> {
 	const resolvedPath = resolvePath(extensionPath, cwd);
 
 	try {
-		const factory = await loadExtensionModule(resolvedPath);
-		if (!factory) {
-			return { extension: null, error: `Extension does not export a valid factory function: ${extensionPath}` };
+		const loaded = await loadExtensionModule(resolvedPath);
+		if (loaded.kind === "invalid") {
+			return {
+				extension: null,
+				layeredCandidate: null,
+				error: `Extension does not export a valid factory or piExtensionLayer descriptor: ${extensionPath}`,
+			};
 		}
 
 		const extension = createExtension(extensionPath, resolvedPath);
 		const api = createExtensionAPI(extension, runtime, cwd, eventBus);
-		await factory(api);
+		if (loaded.kind === "layer") {
+			const meta = loaded.descriptor[PI_EXTENSION_LAYER_SYMBOL];
+			if (!meta?.layer || typeof (meta.layer as { pipe?: unknown }).pipe !== "function") {
+				return {
+					extension: null,
+					layeredCandidate: null,
+					error: `Invalid piExtensionLayer descriptor: ${extensionPath} is missing a usable layer export.`,
+				};
+			}
+			return {
+				extension: null,
+				layeredCandidate: {
+					extensionPath,
+					resolvedPath,
+					extension,
+					api,
+					id: typeof meta.id === "string" ? meta.id : undefined,
+					layer: meta.layer,
+				},
+				error: null,
+			};
+		}
 
-		return { extension, error: null };
+		await loaded.factory(api);
+
+		return { extension, layeredCandidate: null, error: null };
 	} catch (err) {
 		const message = err instanceof Error ? err.message : String(err);
-		return { extension: null, error: `Failed to load extension: ${message}` };
+		return { extension: null, layeredCandidate: null, error: `Failed to load extension: ${message}` };
 	}
 }
 
@@ -382,8 +568,10 @@ export async function loadExtensions(paths: string[], cwd: string, eventBus?: Ev
 	const resolvedEventBus = eventBus ?? createEventBus();
 	const runtime = createExtensionRuntime();
 
+	const layeredCandidates: LayeredExtensionCandidate[] = [];
+
 	for (const extPath of paths) {
-		const { extension, error } = await loadExtension(extPath, cwd, resolvedEventBus, runtime);
+		const { extension, layeredCandidate, error } = await loadExtension(extPath, cwd, resolvedEventBus, runtime);
 
 		if (error) {
 			errors.push({ path: extPath, error });
@@ -393,6 +581,18 @@ export async function loadExtensions(paths: string[], cwd: string, eventBus?: Ev
 		if (extension) {
 			extensions.push(extension);
 		}
+		if (layeredCandidate) {
+			layeredCandidates.push(layeredCandidate);
+		}
+	}
+
+	if (layeredCandidates.length > 0) {
+		const layeredStack = await buildLayeredExtensionStack(layeredCandidates);
+		extensions.push(...layeredStack.extensions);
+		if (layeredStack.teardownExtension) {
+			extensions.push(layeredStack.teardownExtension);
+		}
+		errors.push(...layeredStack.errors);
 	}
 
 	return {
