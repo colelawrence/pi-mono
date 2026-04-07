@@ -21,6 +21,14 @@ import type {
 
 type RecordedSessionEvent = SessionBeforeSwitchEvent | SessionBeforeForkEvent | SessionStartEvent;
 
+function createDeferred<T = void>() {
+	let resolve!: (value: T | PromiseLike<T>) => void;
+	const promise = new Promise<T>((r) => {
+		resolve = r;
+	});
+	return { promise, resolve };
+}
+
 describe("AgentSessionRuntime characterization", () => {
 	const cleanups: Array<() => Promise<void> | void> = [];
 
@@ -231,6 +239,179 @@ describe("AgentSessionRuntime characterization", () => {
 	it("throws when forking with an invalid entry id", async () => {
 		const { runtime } = await createRuntimeForTest(() => {});
 		await expect(runtime.fork("missing-entry")).rejects.toThrow("Invalid entry ID for forking");
+	});
+
+	it("waits for queued agent_end handlers before replacing the session owner", async () => {
+		const agentEndStarted = createDeferred<void>();
+		const releaseAgentEnd = createDeferred<void>();
+		const events: string[] = [];
+		const { runtime } = await createRuntimeForTest((pi: ExtensionAPI) => {
+			pi.on("agent_end", async () => {
+				events.push("agent_end:start");
+				agentEndStarted.resolve();
+				await releaseAgentEnd.promise;
+				events.push("agent_end:end");
+			});
+			pi.on("session_shutdown", async () => {
+				events.push("session_shutdown");
+			});
+			pi.on("session_start", (event) => {
+				events.push(`session_start:${event.reason}`);
+			});
+		});
+
+		events.length = 0;
+		const promptPromise = runtime.session.prompt("hello");
+		await agentEndStarted.promise;
+
+		let newSessionResolved = false;
+		const newSessionPromise = runtime.newSession().then((result) => {
+			newSessionResolved = true;
+			return result;
+		});
+		await new Promise((resolve) => setTimeout(resolve, 20));
+
+		expect(newSessionResolved).toBe(false);
+		expect(events).toEqual(["agent_end:start"]);
+
+		releaseAgentEnd.resolve();
+		const newSessionResult = await newSessionPromise;
+		await promptPromise;
+		expect(newSessionResult.cancelled).toBe(false);
+		await runtime.session.bindExtensions({});
+
+		expect(events).toEqual(["agent_end:start", "agent_end:end", "session_shutdown", "session_start:new"]);
+	});
+
+	it("suppresses stale auto-retry before newSession replaces the session owner", async () => {
+		const agentEndStarted = createDeferred<void>();
+		const releaseAgentEnd = createDeferred<void>();
+		const events: string[] = [];
+		const { runtime, faux } = await createRuntimeForTest((pi: ExtensionAPI) => {
+			pi.on("agent_end", async () => {
+				events.push("agent_end:start");
+				agentEndStarted.resolve();
+				await releaseAgentEnd.promise;
+				events.push("agent_end:end");
+			});
+			pi.on("session_shutdown", async () => {
+				events.push("session_shutdown");
+			});
+			pi.on("session_start", (event) => {
+				events.push(`session_start:${event.reason}`);
+			});
+		});
+		faux.setResponses([
+			fauxAssistantMessage("", { stopReason: "error", errorMessage: "overloaded_error" }),
+			fauxAssistantMessage("should not run"),
+		]);
+
+		events.length = 0;
+		const promptPromise = runtime.session.prompt("hello");
+		await agentEndStarted.promise;
+
+		const newSessionPromise = runtime.newSession();
+		await new Promise((resolve) => setTimeout(resolve, 20));
+		expect(faux.getPendingResponseCount()).toBe(1);
+
+		releaseAgentEnd.resolve();
+		const newSessionResult = await newSessionPromise;
+		await promptPromise;
+		expect(newSessionResult.cancelled).toBe(false);
+		await runtime.session.bindExtensions({});
+
+		expect(faux.getPendingResponseCount()).toBe(1);
+		expect(runtime.session.isRetrying).toBe(false);
+		expect(events).toEqual(["agent_end:start", "agent_end:end", "session_shutdown", "session_start:new"]);
+	});
+
+	it("suppresses stale auto-retry before switchSession replaces the session owner", async () => {
+		const agentEndStarted = createDeferred<void>();
+		const releaseAgentEnd = createDeferred<void>();
+		const events: string[] = [];
+		const { runtime, faux, tempDir } = await createRuntimeForTest((pi: ExtensionAPI) => {
+			pi.on("agent_end", async () => {
+				events.push("agent_end:start");
+				agentEndStarted.resolve();
+				await releaseAgentEnd.promise;
+				events.push("agent_end:end");
+			});
+			pi.on("session_shutdown", async () => {
+				events.push("session_shutdown");
+			});
+			pi.on("session_start", (event) => {
+				events.push(`session_start:${event.reason}`);
+			});
+		});
+		faux.setResponses([
+			fauxAssistantMessage("", { stopReason: "error", errorMessage: "overloaded_error" }),
+			fauxAssistantMessage("should not run"),
+		]);
+		const targetDir = join(tempDir, "switch-target");
+		const targetRuntime = await createRuntimeForTest(() => {}, { cwd: targetDir });
+		await targetRuntime.runtime.session.prompt("other");
+		const targetSessionFile = targetRuntime.runtime.session.sessionFile!;
+
+		events.length = 0;
+		const promptPromise = runtime.session.prompt("hello");
+		await agentEndStarted.promise;
+
+		const switchPromise = runtime.switchSession(targetSessionFile);
+		await new Promise((resolve) => setTimeout(resolve, 20));
+		expect(faux.getPendingResponseCount()).toBe(1);
+
+		releaseAgentEnd.resolve();
+		const switchResult = await switchPromise;
+		await promptPromise;
+		expect(switchResult.cancelled).toBe(false);
+		await runtime.session.bindExtensions({});
+
+		expect(faux.getPendingResponseCount()).toBe(1);
+		expect(runtime.session.isRetrying).toBe(false);
+		expect(events).toEqual(["agent_end:start", "agent_end:end", "session_shutdown", "session_start:resume"]);
+	});
+
+	it("suppresses stale auto-retry before fork replaces the session owner", async () => {
+		const agentEndStarted = createDeferred<void>();
+		const releaseAgentEnd = createDeferred<void>();
+		const events: string[] = [];
+		const { runtime, faux } = await createRuntimeForTest((pi: ExtensionAPI) => {
+			pi.on("agent_end", async () => {
+				events.push("agent_end:start");
+				agentEndStarted.resolve();
+				await releaseAgentEnd.promise;
+				events.push("agent_end:end");
+			});
+			pi.on("session_shutdown", async () => {
+				events.push("session_shutdown");
+			});
+			pi.on("session_start", (event) => {
+				events.push(`session_start:${event.reason}`);
+			});
+		});
+		faux.setResponses([
+			fauxAssistantMessage("", { stopReason: "error", errorMessage: "overloaded_error" }),
+			fauxAssistantMessage("should not run"),
+		]);
+
+		events.length = 0;
+		const promptPromise = runtime.session.prompt("hello");
+		await agentEndStarted.promise;
+		const userMessage = runtime.session.getUserMessagesForForking()[0]!;
+
+		const forkPromise = runtime.fork(userMessage.entryId);
+		await new Promise((resolve) => setTimeout(resolve, 20));
+		expect(faux.getPendingResponseCount()).toBe(1);
+
+		releaseAgentEnd.resolve();
+		const forkResult = await forkPromise;
+		await promptPromise;
+		expect(forkResult.cancelled).toBe(false);
+		await runtime.session.bindExtensions({});
+
+		expect(faux.getPendingResponseCount()).toBe(1);
+		expect(runtime.session.isRetrying).toBe(false);
+		expect(events).toEqual(["agent_end:start", "agent_end:end", "session_shutdown", "session_start:fork"]);
 	});
 
 	it("updates process.cwd() on cross-cwd session replacement", async () => {

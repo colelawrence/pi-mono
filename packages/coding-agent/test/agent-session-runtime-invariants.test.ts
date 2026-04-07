@@ -12,13 +12,14 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { Agent } from "@mariozechner/pi-agent-core";
 import { type AssistantMessage, type AssistantMessageEvent, EventStream, getModel } from "@mariozechner/pi-ai";
-import { afterEach, beforeEach, describe, expect, it } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { AgentSession } from "../src/core/agent-session.js";
 import { AuthStorage } from "../src/core/auth-storage.js";
+import { createSessionRuntime } from "../src/core/session-runtime.js";
 import { ModelRegistry } from "../src/core/model-registry.js";
 import { SessionManager } from "../src/core/session-manager.js";
 import { SettingsManager } from "../src/core/settings-manager.js";
-import { createTestResourceLoader } from "./utilities.js";
+import { createTestExtensionsResult, createTestResourceLoader } from "./utilities.js";
 
 class MockAssistantStream extends EventStream<AssistantMessageEvent, AssistantMessage> {
 	constructor() {
@@ -54,6 +55,18 @@ function createAssistantMessage(text: string, overrides?: Partial<AssistantMessa
 	};
 }
 
+function createDeferred<T = void>() {
+	let resolve!: (value: T | PromiseLike<T>) => void;
+	const promise = new Promise<T>((r) => {
+		resolve = r;
+	});
+	return { promise, resolve };
+}
+
+type SessionWithCompactionInternals = {
+	_runAutoCompaction: (reason: "overflow" | "threshold", willRetry: boolean) => Promise<void>;
+};
+
 describe("AgentSession runtime invariants", () => {
 	let session: AgentSession;
 	let tempDir: string;
@@ -64,6 +77,8 @@ describe("AgentSession runtime invariants", () => {
 	});
 
 	afterEach(() => {
+		vi.restoreAllMocks();
+		vi.useRealTimers();
 		if (session) {
 			session.dispose();
 		}
@@ -190,12 +205,102 @@ describe("AgentSession runtime invariants", () => {
 		expect(agentEndIdx).toBeGreaterThan(messageEndIdx);
 	});
 
+	it("fenceForLifecycleSeam cancels an already-armed continuation timer", async () => {
+		const runtime = createSessionRuntime({
+			processEvent: async () => {},
+			isRetryableAgentEnd: () => false,
+		});
+		let continueCalls = 0;
+		const fakeAgent = {
+			continue: async () => {
+				continueCalls++;
+			},
+		} as unknown as Agent;
+
+		runtime.scheduleContinuation(fakeAgent, 20);
+		await new Promise((resolve) => setTimeout(resolve, 5));
+		await runtime.fenceForLifecycleSeam();
+		await new Promise((resolve) => setTimeout(resolve, 30));
+
+		expect(continueCalls).toBe(0);
+		runtime.dispose();
+	});
+
 	/**
-	 * INVARIANT: sendCustomMessage with triggerTurn routes correctly based on phase.
-	 *
-	 * When called during a prompt drain loop, it should queue as followUp.
-	 * When called idle, it should start a new turn.
+	 * INVARIANT: a lifecycle seam fence cancels auto-compaction continuations that
+	 * were armed by the old owner before the seam.
 	 */
+	it("fenceLifecycleSeam cancels an auto-compaction continuation armed before the seam", async () => {
+		vi.useFakeTimers();
+		let callCount = 0;
+		const model = getModel("anthropic", "claude-sonnet-4-5")!;
+		const agent = new Agent({
+			getApiKey: () => "test-key",
+			initialState: { model, systemPrompt: "Test", tools: [] },
+			streamFn: () => {
+				callCount++;
+				const stream = new MockAssistantStream();
+				queueMicrotask(() => {
+					const msg = createAssistantMessage(`Response ${callCount}`, {
+						usage: {
+							input: 2_000,
+							output: 0,
+							cacheRead: 0,
+							cacheWrite: 0,
+							totalTokens: 2_000,
+							cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
+						},
+					});
+					stream.push({ type: "start", partial: msg });
+					stream.push({ type: "done", reason: "stop", message: msg });
+				});
+				return stream;
+			},
+		});
+
+		const sessionManager = SessionManager.inMemory();
+		const settingsManager = SettingsManager.create(tempDir, tempDir);
+		const authStorage = AuthStorage.create(join(tempDir, "auth.json"));
+		const modelRegistry = new ModelRegistry(authStorage, tempDir);
+		authStorage.setRuntimeApiKey("anthropic", "test-key");
+		const extensionsResult = await createTestExtensionsResult(
+			[
+				(pi) => {
+					pi.on("session_before_compact", async (event) => ({
+						compaction: {
+							summary: "auto compacted",
+							firstKeptEntryId: event.preparation.firstKeptEntryId,
+							tokensBefore: event.preparation.tokensBefore,
+							details: {},
+						},
+					}));
+				},
+			],
+			tempDir,
+		);
+
+		session = new AgentSession({
+			agent,
+			sessionManager,
+			settingsManager,
+			cwd: tempDir,
+			modelRegistry,
+			resourceLoader: createTestResourceLoader({ extensionsResult }),
+		});
+		await session.bindExtensions({ shutdownHandler: () => {} });
+		await session.prompt("one");
+		await session.prompt("two");
+
+		const continueSpy = vi.spyOn(session.agent, "continue").mockResolvedValue();
+		const sessionInternals = session as unknown as SessionWithCompactionInternals;
+		await sessionInternals._runAutoCompaction("overflow", true);
+		await session.fenceLifecycleSeam();
+		vi.advanceTimersByTime(150);
+		await Promise.resolve();
+
+		expect(continueSpy).not.toHaveBeenCalled();
+	});
+
 	it("sendCustomMessage queues as followUp during prompt drain loop", async () => {
 		let callCount = 0;
 		let followUpSeen = false;
@@ -323,6 +428,157 @@ describe("AgentSession runtime invariants", () => {
 		await session.prompt("Fresh start");
 
 		expect(callCount).toBe(3);
+	});
+
+	it("reload() waits for queued extension events before shutdown and rebuild", async () => {
+		const model = getModel("anthropic", "claude-sonnet-4-5")!;
+		const agentEndStarted = createDeferred<void>();
+		const releaseAgentEnd = createDeferred<void>();
+		const events: string[] = [];
+
+		const agent = new Agent({
+			getApiKey: () => "test-key",
+			initialState: { model, systemPrompt: "Test", tools: [] },
+			streamFn: () => {
+				const stream = new MockAssistantStream();
+				queueMicrotask(() => {
+					const msg = createAssistantMessage("Reload fence");
+					stream.push({ type: "start", partial: msg });
+					stream.push({ type: "done", reason: "stop", message: msg });
+				});
+				return stream;
+			},
+		});
+
+		const sessionManager = SessionManager.inMemory();
+		const settingsManager = SettingsManager.create(tempDir, tempDir);
+		const authStorage = AuthStorage.create(join(tempDir, "auth.json"));
+		const modelRegistry = new ModelRegistry(authStorage, tempDir);
+		authStorage.setRuntimeApiKey("anthropic", "test-key");
+		const extensionsResult = await createTestExtensionsResult(
+			[
+				(pi) => {
+					pi.on("agent_end", async () => {
+						events.push("agent_end:start");
+						agentEndStarted.resolve();
+						await releaseAgentEnd.promise;
+						events.push("agent_end:end");
+					});
+					pi.on("session_shutdown", async () => {
+						events.push("session_shutdown");
+					});
+					pi.on("session_start", async (event) => {
+						events.push(`session_start:${event.reason}`);
+					});
+				},
+			],
+			tempDir,
+		);
+
+		session = new AgentSession({
+			agent,
+			sessionManager,
+			settingsManager,
+			cwd: tempDir,
+			modelRegistry,
+			resourceLoader: createTestResourceLoader({ extensionsResult }),
+		});
+		await session.bindExtensions({ shutdownHandler: () => {} });
+		events.length = 0;
+
+		const promptPromise = session.prompt("Test");
+		await agentEndStarted.promise;
+
+		let reloadResolved = false;
+		const reloadPromise = session.reload().then(() => {
+			reloadResolved = true;
+		});
+		await new Promise((resolve) => setTimeout(resolve, 20));
+
+		expect(reloadResolved).toBe(false);
+		expect(events).toEqual(["agent_end:start"]);
+
+		releaseAgentEnd.resolve();
+		await Promise.all([promptPromise, reloadPromise]);
+
+		expect(events).toEqual(["agent_end:start", "agent_end:end", "session_shutdown", "session_start:reload"]);
+	});
+
+	it("reload() suppresses stale auto-retry while agent_end drains across the seam", async () => {
+		let callCount = 0;
+		const model = getModel("anthropic", "claude-sonnet-4-5")!;
+		const agentEndStarted = createDeferred<void>();
+		const releaseAgentEnd = createDeferred<void>();
+		const events: string[] = [];
+
+		const agent = new Agent({
+			getApiKey: () => "test-key",
+			initialState: { model, systemPrompt: "Test", tools: [] },
+			streamFn: () => {
+				callCount++;
+				const stream = new MockAssistantStream();
+				queueMicrotask(() => {
+					const msg = createAssistantMessage("", {
+						stopReason: "error",
+						errorMessage: "overloaded_error",
+					});
+					stream.push({ type: "start", partial: msg });
+					stream.push({ type: "error", reason: "error", error: msg });
+				});
+				return stream;
+			},
+		});
+
+		const sessionManager = SessionManager.inMemory();
+		const settingsManager = SettingsManager.create(tempDir, tempDir);
+		settingsManager.applyOverrides({ retry: { enabled: true, maxRetries: 3, baseDelayMs: 10 } });
+		const authStorage = AuthStorage.create(join(tempDir, "auth.json"));
+		const modelRegistry = new ModelRegistry(authStorage, tempDir);
+		authStorage.setRuntimeApiKey("anthropic", "test-key");
+		const extensionsResult = await createTestExtensionsResult(
+			[
+				(pi) => {
+					pi.on("agent_end", async () => {
+						events.push("agent_end:start");
+						agentEndStarted.resolve();
+						await releaseAgentEnd.promise;
+						events.push("agent_end:end");
+					});
+					pi.on("session_shutdown", async () => {
+						events.push("session_shutdown");
+					});
+					pi.on("session_start", async (event) => {
+						events.push(`session_start:${event.reason}`);
+					});
+				},
+			],
+			tempDir,
+		);
+
+		session = new AgentSession({
+			agent,
+			sessionManager,
+			settingsManager,
+			cwd: tempDir,
+			modelRegistry,
+			resourceLoader: createTestResourceLoader({ extensionsResult }),
+		});
+		await session.bindExtensions({ shutdownHandler: () => {} });
+		events.length = 0;
+
+		const promptPromise = session.prompt("Test");
+		await agentEndStarted.promise;
+
+		const reloadPromise = session.reload();
+		await new Promise((resolve) => setTimeout(resolve, 20));
+		expect(callCount).toBe(1);
+
+		releaseAgentEnd.resolve();
+		await Promise.all([promptPromise, reloadPromise]);
+
+		expect(callCount).toBe(1);
+		expect(session.isRetrying).toBe(false);
+		expect(events).toEqual(["agent_end:start", "agent_end:end", "session_shutdown", "session_start:reload"]);
 	});
 
 	it("reload() picks up auth.json changes", async () => {

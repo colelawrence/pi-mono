@@ -100,6 +100,20 @@ export interface SessionRuntime {
 	readonly drainEventQueue: () => Promise<void>;
 
 	/**
+	 * Fence a lifecycle seam. Cancels delayed continuation/retry work owned by
+	 * the current runtime, then drains all already-accepted queued event work.
+	 * Resolves only once the old runtime no longer has async authority.
+	 */
+	readonly fenceForLifecycleSeam: () => Promise<void>;
+
+	/**
+	 * Whether a lifecycle seam fence is currently active.
+	 * Used by callers to suppress starting new retry/continuation work while
+	 * already-accepted old-owner events are draining.
+	 */
+	readonly isLifecycleFenceActive: () => boolean;
+
+	/**
 	 * Check current phase synchronously.
 	 */
 	readonly getPhase: () => Phase;
@@ -198,6 +212,8 @@ export function createSessionRuntime(deps: SessionRuntimeDeps): SessionRuntime {
 
 	// Continuation fibers (setTimeout replacements)
 	let continuationTimer: ReturnType<typeof setTimeout> | null = null;
+	let continuationGeneration = 0;
+	let lifecycleFenceDepth = 0;
 
 	// --- Event subscription ---
 	function subscribeToAgent(agent: Agent): () => void {
@@ -226,6 +242,22 @@ export function createSessionRuntime(deps: SessionRuntimeDeps): SessionRuntime {
 	// --- Drain ---
 	async function drainEventQueue(): Promise<void> {
 		await eventQueue;
+	}
+
+	async function fenceForLifecycleSeam(): Promise<void> {
+		lifecycleFenceDepth++;
+		continuationGeneration++;
+		cancelContinuation();
+		abortRetry();
+		try {
+			await drainEventQueue();
+		} finally {
+			lifecycleFenceDepth--;
+		}
+	}
+
+	function isLifecycleFenceActive(): boolean {
+		return lifecycleFenceDepth > 0;
 	}
 
 	// --- Prompt cycle ---
@@ -340,9 +372,16 @@ export function createSessionRuntime(deps: SessionRuntimeDeps): SessionRuntime {
 
 	// --- Continuation scheduling ---
 	function scheduleContinuation(agent: Agent, delayMs: number): void {
+		if (lifecycleFenceDepth > 0) {
+			return;
+		}
 		cancelContinuation();
+		const generation = continuationGeneration;
 		continuationTimer = setTimeout(() => {
 			continuationTimer = null;
+			if (generation !== continuationGeneration) {
+				return;
+			}
 			agent.continue().catch(() => {});
 		}, delayMs);
 	}
@@ -356,6 +395,7 @@ export function createSessionRuntime(deps: SessionRuntimeDeps): SessionRuntime {
 
 	// --- Abort ---
 	function abortAll(): void {
+		continuationGeneration++;
 		cancelContinuation();
 		abortRetry();
 	}
@@ -370,6 +410,8 @@ export function createSessionRuntime(deps: SessionRuntimeDeps): SessionRuntime {
 		runPromptCycle,
 		runCustomMessageCycle,
 		drainEventQueue,
+		fenceForLifecycleSeam,
+		isLifecycleFenceActive,
 		getPhase,
 		isInPromptDrainLoop,
 		getRetryAttempt,

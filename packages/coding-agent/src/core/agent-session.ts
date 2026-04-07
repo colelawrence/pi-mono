@@ -1409,6 +1409,14 @@ export class AgentSession {
 		await this.agent.waitForIdle();
 	}
 
+	/**
+	 * Fence a lifecycle seam so no already-accepted async runtime work can cross
+	 * into a reloaded, compacted, or replaced session owner.
+	 */
+	async fenceLifecycleSeam(): Promise<void> {
+		await this._runtime.fenceForLifecycleSeam();
+	}
+
 	// =========================================================================
 	// Model Management
 	// =========================================================================
@@ -1643,6 +1651,7 @@ export class AgentSession {
 	 */
 	async compact(customInstructions?: string): Promise<CompactionResult> {
 		this._disconnectFromAgent();
+		await this.fenceLifecycleSeam();
 		await this.abort();
 		this._compactionAbortController = new AbortController();
 		this._emit({ type: "compaction_start", reason: "manual" });
@@ -2413,6 +2422,7 @@ export class AgentSession {
 	}
 
 	async reload(): Promise<void> {
+		await this.fenceLifecycleSeam();
 		const previousFlagValues = this._extensionRunner?.getFlagValues();
 		await this._extensionRunner?.emit({ type: "session_shutdown" });
 		await this.settingsManager.reload();
@@ -2473,6 +2483,14 @@ export class AgentSession {
 			return false;
 		}
 
+		// Lifecycle seams own the boundary between old accepted work and new owner
+		// authority. If a seam fence is active while an old agent_end drains, do not
+		// start a new retry/backoff/continue chain from that stale owner.
+		if (this._runtime.isLifecycleFenceActive()) {
+			this._runtime.resolveRetry();
+			return false;
+		}
+
 		// Retry Deferred is created synchronously in subscribeToAgent handler for agent_end.
 		// incrementRetry() has a defensive fallback in case that path was bypassed.
 		const attempt = this._runtime.incrementRetry();
@@ -2524,6 +2542,19 @@ export class AgentSession {
 			return false;
 		} finally {
 			this._runtime.clearRetryAbortController(retryAbortController);
+		}
+
+		// A lifecycle seam may have started while we were sleeping. In that case the
+		// old owner must not reopen work via continue().
+		if (this._runtime.isLifecycleFenceActive()) {
+			this._emit({
+				type: "auto_retry_end",
+				success: false,
+				attempt,
+				finalError: "Retry cancelled",
+			});
+			this._runtime.resolveRetry();
+			return false;
 		}
 
 		// Retry via continue() - use scheduleContinuation to break out of event handler chain
