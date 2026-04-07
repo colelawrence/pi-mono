@@ -6,7 +6,7 @@ import {
 	TUI_KEYBINDINGS,
 	KeybindingsManager as TuiKeybindingsManager,
 } from "@mariozechner/pi-tui";
-import { existsSync, readFileSync, writeFileSync } from "fs";
+import { existsSync, readFileSync } from "fs";
 import { join } from "path";
 import { getAgentDir } from "../config.js";
 
@@ -33,6 +33,8 @@ export interface AppKeybindings {
 	"app.session.resume": true;
 	"app.tree.foldOrUp": true;
 	"app.tree.unfoldOrDown": true;
+	"app.tree.editLabel": true;
+	"app.tree.toggleLabelTimestamp": true;
 	"app.session.togglePath": true;
 	"app.session.toggleSort": true;
 	"app.session.rename": true;
@@ -105,6 +107,14 @@ export const KEYBINDINGS = {
 	"app.tree.unfoldOrDown": {
 		defaultKeys: ["ctrl+right", "alt+right"],
 		description: "Unfold tree branch or move down",
+	},
+	"app.tree.editLabel": {
+		defaultKeys: "shift+l",
+		description: "Edit tree label",
+	},
+	"app.tree.toggleLabelTimestamp": {
+		defaultKeys: "shift+t",
+		description: "Toggle tree label timestamps",
 	},
 	"app.session.togglePath": {
 		defaultKeys: "ctrl+p",
@@ -181,6 +191,8 @@ const KEYBINDING_NAME_MIGRATIONS = {
 	resume: "app.session.resume",
 	treeFoldOrUp: "app.tree.foldOrUp",
 	treeUnfoldOrDown: "app.tree.unfoldOrDown",
+	treeEditLabel: "app.tree.editLabel",
+	treeToggleLabelTimestamp: "app.tree.toggleLabelTimestamp",
 	toggleSessionPath: "app.session.togglePath",
 	toggleSessionSort: "app.session.toggleSort",
 	renameSession: "app.session.rename",
@@ -212,7 +224,7 @@ function toKeybindingsConfig(value: unknown): KeybindingsConfig {
 	return config;
 }
 
-function migrateKeybindingNames(rawConfig: Record<string, unknown>): {
+export function migrateKeybindingsConfig(rawConfig: Record<string, unknown>): {
 	config: Record<string, unknown>;
 	migrated: boolean;
 } {
@@ -262,18 +274,6 @@ function loadRawConfig(path: string): Record<string, unknown> | undefined {
 	}
 }
 
-export function migrateKeybindingsConfigFile(agentDir: string = getAgentDir()): boolean {
-	const configPath = join(agentDir, "keybindings.json");
-	const rawConfig = loadRawConfig(configPath);
-	if (!rawConfig) return false;
-
-	const { config, migrated } = migrateKeybindingNames(rawConfig);
-	if (!migrated) return false;
-
-	writeFileSync(configPath, `${JSON.stringify(config, null, 2)}\n`, "utf-8");
-	return true;
-}
-
 export class KeybindingsManager extends TuiKeybindingsManager {
 	private configPath: string | undefined;
 
@@ -300,7 +300,7 @@ export class KeybindingsManager extends TuiKeybindingsManager {
 	private static loadFromFile(path: string): KeybindingsConfig {
 		const rawConfig = loadRawConfig(path);
 		if (!rawConfig) return {};
-		return toKeybindingsConfig(migrateKeybindingNames(rawConfig).config);
+		return toKeybindingsConfig(migrateKeybindingsConfig(rawConfig).config);
 	}
 }
 

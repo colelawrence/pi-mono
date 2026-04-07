@@ -127,7 +127,10 @@ export class VirtualTerminal implements Terminal {
 	 * Wait for all pending writes to complete. Viewport and scroll buffer will be updated.
 	 */
 	async flush(): Promise<void> {
-		// Write an empty string to ensure all previous writes are flushed
+		// requestRender() may schedule a throttled render on a short timer before
+		// writing to xterm. Wait a beat so timer-driven renders can enqueue output,
+		// then flush xterm's pending writes.
+		await new Promise<void>((resolve) => setTimeout(resolve, 20));
 		return new Promise<void>((resolve) => {
 			this.xterm.write("", () => resolve());
 		});

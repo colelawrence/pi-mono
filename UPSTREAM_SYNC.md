@@ -83,6 +83,7 @@ Resolution pattern:
 - Prefer upstream render pipeline shape.
 - Reapply local behavior with minimal inline changes near the existing overflow and render-error handling.
 - Avoid helper-heavy refactors here; they increase future merge friction.
+- If upstream render scheduling becomes timer-driven, keep the test harness waiting on scheduled writes before asserting viewport state.
 
 Verification:
 ```bash
@@ -109,10 +110,12 @@ npx vitest --run test/user-turn-ready.test.ts test/agent-session-runtime-invaria
 ### `packages/coding-agent/src/core/extensions/loader.ts`, `packages/coding-agent/src/core/extensions/host-capabilities.ts`
 Intent:
 - Expose downstream host capabilities (currently `epiUserTurnReadyV1`) to extensions alongside upstream loader/source-info behavior.
+- Preserve downstream layered-extension descriptor support (`piExtensionLayer(...)`) without breaking classic factory loading.
 
 Resolution pattern:
 - Prefer upstream loader/runtime initialization flow.
 - Reapply downstream capability exposure as small additive accessors and constants, not a loader refactor.
+- Keep layered-extension support as an additive path: classic factory loading must still work, malformed descriptors must fail fast, and duplicate ids must be rejected clearly.
 
 Verification:
 ```bash
@@ -282,3 +285,25 @@ If a sync exposed a recurring conflict pattern, confusing decision point, or bet
   - repeated friction: temporary worktrees can inherit misleading workspace symlinks when they borrow another checkout’s `node_modules`
   - next carry to reduce: move `epi_user_turn_ready` and epi runtime exposure farther out of `agent-session.ts` if a cleaner extension/session seam becomes available
   - process update: when a temporary sync worktree needs package-manager state, prefer a local `npm install` in that worktree over a shared `node_modules` symlink if workspace package links matter for build/test correctness
+
+## Sync 2026-04-07
+- merged: `upstream/main @ 773f91f4`
+- branch: `sync/upstream-2026-04-07`
+- conflicts:
+  - `packages/coding-agent/src/core/agent-session.ts` — kept downstream session-runtime + epi runtime bridge, reapplied reload auth/model refresh, and adapted upstream Agent API removal of `setSystemPrompt()` to `agent.state.systemPrompt = ...`
+  - `packages/agent/package.json`, `packages/coding-agent/package.json`, `package-lock.json` — updated to upstream `0.65.2` workspace versions while preserving downstream-required dependencies (`@sinclair/typebox`, `@opentelemetry/api`)
+- verification:
+  - [x] `cd packages/tui && node --test --import tsx test/tui-render.test.ts`
+  - [x] `cd packages/agent && npm run build`
+  - [x] `cd packages/coding-agent && npx vitest --run test/host-capabilities.test.ts test/trigger-compact-extension.test.ts test/user-turn-ready.test.ts test/agent-session-runtime-invariants.test.ts`
+  - [x] `./install-epi.sh`
+- notes:
+  - current carry patches still expected: `packages/tui/src/tui.ts` for loud-but-non-fatal render failures/overwide lines, `packages/coding-agent/src/core/agent-session.ts` / `session-runtime.ts` / `user-turn-ready.ts` for epi runtime + turn-ready integration, and `packages/coding-agent/src/core/extensions/loader.ts` / `host-capabilities.ts` for downstream host-capability + layered-extension support
+  - `packages/tui/test/virtual-terminal.ts` now waits for timer-driven renders so `tui-render.test.ts` stays truthful after upstream render throttling
+  - `packages/ai/src/models.generated.ts` changed as part of the upstream merge state, and the additional live-catalog regeneration from `./install-epi.sh` was dropped before commit so the sync does not carry extra incidental churn
+  - this sync was prepared in a temporary worktree because the primary checkout had pre-existing dirt in `packages/ai/src/models.generated.ts`, `packages/coding-agent/src/core/agent-session.ts`, and `packages/coding-agent/test/agent-session-runtime-invariants.test.ts`
+- reflection:
+  - surprisingly easy: loader/host-capability carry auto-merged cleanly despite broader upstream coding-agent churn
+  - repeated friction: upstream’s timer-throttled TUI renders can make existing test helpers observe the terminal too early unless the harness waits for scheduled writes
+  - next carry to reduce: move `epi_user_turn_ready` and epi runtime exposure farther out of `agent-session.ts`, and carve loader descriptor support into a seam smaller than the current `loader.ts` delta if upstream offers one
+  - process update: when upstream introduces timer-based rendering or other delayed side effects, update verification helpers in the same sync so tests wait on the real seam instead of an outdated immediate-write assumption
