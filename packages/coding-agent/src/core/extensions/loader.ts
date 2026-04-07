@@ -412,10 +412,10 @@ async function buildLayeredExtensionStack(
 			moduleCache: false,
 			...(isBunBinary ? { virtualModules: VIRTUAL_MODULES, tryNative: false } : { alias: getAliases() }),
 		});
-		const [{ Effect, Exit, Layer, Scope }, adapter] = await Promise.all([
+		const [{ Effect, Exit, Layer, Scope }, adapter] = (await Promise.all([
 			extensionJiti.import("effect"),
 			extensionJiti.import("@phosphor/pi-sdk-effect-adapter"),
-		]);
+		])) as [Record<string, any>, Record<string, any>];
 		effectApi = { Effect, Exit, Layer, Scope };
 		const { ExtensionSetup, onEffect, registerCommandEffect, registerToolEffect } = adapter as Record<string, any>;
 		if (
@@ -434,7 +434,7 @@ async function buildLayeredExtensionStack(
 			if (!closePromise) {
 				closePromise = Effect.runPromise(Scope.close(rootScope, Exit.void));
 			}
-			return closePromise;
+			return closePromise!;
 		};
 
 		const layers = candidates.map((candidate) => {
@@ -471,11 +471,12 @@ async function buildLayeredExtensionStack(
 		};
 	} catch (err) {
 		if (rootScope && effectApi) {
+			const { Effect, Exit, Scope } = effectApi;
 			const closeRootScope = (): Promise<void> => {
 				if (!closePromise) {
-					closePromise = effectApi.Effect.runPromise(effectApi.Scope.close(rootScope, effectApi.Exit.void));
+					closePromise = Effect.runPromise(Scope.close(rootScope, Exit.void));
 				}
-				return closePromise;
+				return closePromise!;
 			};
 			await closeRootScope();
 		}
