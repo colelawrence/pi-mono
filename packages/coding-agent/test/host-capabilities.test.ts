@@ -14,7 +14,7 @@ describe("host capabilities", () => {
 		const runtime = createExtensionRuntime();
 		const sessionManager = SessionManager.inMemory();
 		const authStorage = AuthStorage.create(path.join(tempDir, "auth.json"));
-		const modelRegistry = new ModelRegistry(authStorage);
+		const modelRegistry = ModelRegistry.create(authStorage);
 		const runner = new ExtensionRunner([], runtime, tempDir, sessionManager, modelRegistry);
 
 		const extensionActions: ExtensionActions = {

@@ -15,9 +15,9 @@ import { type AssistantMessage, type AssistantMessageEvent, EventStream, getMode
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { AgentSession } from "../src/core/agent-session.js";
 import { AuthStorage } from "../src/core/auth-storage.js";
-import { createSessionRuntime } from "../src/core/session-runtime.js";
 import { ModelRegistry } from "../src/core/model-registry.js";
 import { SessionManager } from "../src/core/session-manager.js";
+import { createSessionRuntime } from "../src/core/session-runtime.js";
 import { SettingsManager } from "../src/core/settings-manager.js";
 import { createTestExtensionsResult, createTestResourceLoader } from "./utilities.js";
 
@@ -127,7 +127,7 @@ describe("AgentSession runtime invariants", () => {
 		const sessionManager = SessionManager.inMemory();
 		const settingsManager = SettingsManager.create(tempDir, tempDir);
 		const authStorage = AuthStorage.create(join(tempDir, "auth.json"));
-		const modelRegistry = new ModelRegistry(authStorage, tempDir);
+		const modelRegistry = ModelRegistry.create(authStorage, tempDir);
 		authStorage.setRuntimeApiKey("anthropic", "test-key");
 		settingsManager.applyOverrides({ retry: { enabled: true, maxRetries: 3, baseDelayMs: 50 } });
 
@@ -174,7 +174,7 @@ describe("AgentSession runtime invariants", () => {
 		const sessionManager = SessionManager.inMemory();
 		const settingsManager = SettingsManager.create(tempDir, tempDir);
 		const authStorage = AuthStorage.create(join(tempDir, "auth.json"));
-		const modelRegistry = new ModelRegistry(authStorage, tempDir);
+		const modelRegistry = ModelRegistry.create(authStorage, tempDir);
 		authStorage.setRuntimeApiKey("anthropic", "test-key");
 
 		session = new AgentSession({
@@ -261,7 +261,7 @@ describe("AgentSession runtime invariants", () => {
 		const sessionManager = SessionManager.inMemory();
 		const settingsManager = SettingsManager.create(tempDir, tempDir);
 		const authStorage = AuthStorage.create(join(tempDir, "auth.json"));
-		const modelRegistry = new ModelRegistry(authStorage, tempDir);
+		const modelRegistry = ModelRegistry.create(authStorage, tempDir);
 		authStorage.setRuntimeApiKey("anthropic", "test-key");
 		const extensionsResult = await createTestExtensionsResult(
 			[
@@ -324,7 +324,7 @@ describe("AgentSession runtime invariants", () => {
 		const sessionManager = SessionManager.inMemory();
 		const settingsManager = SettingsManager.create(tempDir, tempDir);
 		const authStorage = AuthStorage.create(join(tempDir, "auth.json"));
-		const modelRegistry = new ModelRegistry(authStorage, tempDir);
+		const modelRegistry = ModelRegistry.create(authStorage, tempDir);
 		authStorage.setRuntimeApiKey("anthropic", "test-key");
 
 		session = new AgentSession({
@@ -397,7 +397,7 @@ describe("AgentSession runtime invariants", () => {
 		const sessionManager = SessionManager.inMemory();
 		const settingsManager = SettingsManager.create(tempDir, tempDir);
 		const authStorage = AuthStorage.create(join(tempDir, "auth.json"));
-		const modelRegistry = new ModelRegistry(authStorage, tempDir);
+		const modelRegistry = ModelRegistry.create(authStorage, tempDir);
 		authStorage.setRuntimeApiKey("anthropic", "test-key");
 		// Long delay so we can abort during it
 		settingsManager.applyOverrides({ retry: { enabled: true, maxRetries: 5, baseDelayMs: 500 } });
@@ -453,7 +453,7 @@ describe("AgentSession runtime invariants", () => {
 		const sessionManager = SessionManager.inMemory();
 		const settingsManager = SettingsManager.create(tempDir, tempDir);
 		const authStorage = AuthStorage.create(join(tempDir, "auth.json"));
-		const modelRegistry = new ModelRegistry(authStorage, tempDir);
+		const modelRegistry = ModelRegistry.create(authStorage, tempDir);
 		authStorage.setRuntimeApiKey("anthropic", "test-key");
 		const extensionsResult = await createTestExtensionsResult(
 			[
@@ -533,7 +533,7 @@ describe("AgentSession runtime invariants", () => {
 		const settingsManager = SettingsManager.create(tempDir, tempDir);
 		settingsManager.applyOverrides({ retry: { enabled: true, maxRetries: 3, baseDelayMs: 10 } });
 		const authStorage = AuthStorage.create(join(tempDir, "auth.json"));
-		const modelRegistry = new ModelRegistry(authStorage, tempDir);
+		const modelRegistry = ModelRegistry.create(authStorage, tempDir);
 		authStorage.setRuntimeApiKey("anthropic", "test-key");
 		const extensionsResult = await createTestExtensionsResult(
 			[
@@ -593,7 +593,7 @@ describe("AgentSession runtime invariants", () => {
 		const sessionManager = SessionManager.inMemory();
 		const settingsManager = SettingsManager.create(tempDir, tempDir);
 		const authStorage = AuthStorage.create(authPath);
-		const modelRegistry = new ModelRegistry(authStorage, tempDir);
+		const modelRegistry = ModelRegistry.create(authStorage, tempDir);
 
 		session = new AgentSession({
 			agent,

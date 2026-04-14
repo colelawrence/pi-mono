@@ -376,9 +376,11 @@ function createExtension(extensionPath: string, resolvedPath: string): Extension
  * Instead it provides ExtensionSetup, lets the layers register into ordinary
  * Extension objects, and closes the shared scope once per generation on session_shutdown.
  */
-async function buildLayeredExtensionStack(
-	candidates: LayeredExtensionCandidate[],
-): Promise<{ extensions: Extension[]; teardownExtension: Extension | null; errors: Array<{ path: string; error: string }> }> {
+async function buildLayeredExtensionStack(candidates: LayeredExtensionCandidate[]): Promise<{
+	extensions: Extension[];
+	teardownExtension: Extension | null;
+	errors: Array<{ path: string; error: string }>;
+}> {
 	const duplicateErrors = new Map<string, string>();
 	const ids = new Map<string, string>();
 	for (const candidate of candidates) {

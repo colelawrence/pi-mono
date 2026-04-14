@@ -307,3 +307,25 @@ If a sync exposed a recurring conflict pattern, confusing decision point, or bet
   - repeated friction: upstream’s timer-throttled TUI renders can make existing test helpers observe the terminal too early unless the harness waits for scheduled writes
   - next carry to reduce: move `epi_user_turn_ready` and epi runtime exposure farther out of `agent-session.ts`, and carve loader descriptor support into a seam smaller than the current `loader.ts` delta if upstream offers one
   - process update: when upstream introduces timer-based rendering or other delayed side effects, update verification helpers in the same sync so tests wait on the real seam instead of an outdated immediate-write assumption
+
+## Sync 2026-04-14
+- merged: `upstream/main @ 8f66938c`
+- branch: `sync/upstream-2026-04-14`
+- conflicts:
+  - `packages/agent/package.json`, `packages/coding-agent/package.json`, `package-lock.json` — updated to upstream `0.67.1` workspace versions while preserving downstream-required dependencies (`@sinclair/typebox`, `@opentelemetry/api`)
+- verification:
+  - [x] `cd packages/tui && node --test --import tsx test/tui-render.test.ts`
+  - [x] `cd packages/agent && npm run build`
+  - [x] `cd packages/coding-agent && npx vitest --run test/host-capabilities.test.ts test/trigger-compact-extension.test.ts test/user-turn-ready.test.ts test/agent-session-runtime-invariants.test.ts`
+  - [x] `./install-epi.sh`
+  - [x] `npm run check`
+- notes:
+  - current carry patches still expected: `packages/tui/src/tui.ts` for loud-but-non-fatal render failures/overwide lines, `packages/coding-agent/src/core/agent-session.ts` / `session-runtime.ts` / `user-turn-ready.ts` for epi runtime + turn-ready integration, and `packages/coding-agent/src/core/extensions/loader.ts` / `host-capabilities.ts` for downstream host-capability + layered-extension support
+  - `packages/coding-agent/test/host-capabilities.test.ts` and `test/agent-session-runtime-invariants.test.ts` needed a downstream follow-up from `new ModelRegistry(...)` to `ModelRegistry.create(...)` after upstream made the constructor private
+  - `packages/ai/src/models.generated.ts` changed as part of the upstream merge state, and the additional live-catalog regeneration from build/install verification was dropped before finishing the sync so the merge does not carry extra incidental churn
+  - this sync was prepared in a temporary worktree because the primary checkout had pre-existing dirt in `packages/ai/src/models.generated.ts`
+- reflection:
+  - surprisingly easy: the downstream carry files (`agent-session.ts`, `tui.ts`, loader/host-capability files) auto-merged cleanly; only package manifests / lockfile conflicted
+  - repeated friction: package-based tests and workspace typechecks in a temporary worktree still need local built `dist/` outputs for workspace imports such as `@mariozechner/pi-ai`, `@mariozechner/pi-tui`, and `@mariozechner/pi-web-ui`
+  - next carry to reduce: keep chasing smaller seams for the coding-agent carries so future syncs keep landing as package/version bumps instead of core-file conflicts
+  - process update: when root `npm run check` fails in a temporary worktree on missing workspace package entrypoints, build the depended-on workspace package in that worktree before retrying the check
