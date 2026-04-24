@@ -1,16 +1,6 @@
-<!-- OSS_WEEKEND_START -->
-# 🏖️ OSS Weekend
-
-**Issue tracker reopens Monday, April 20, 2026.**
-
-OSS weekend runs Monday, April 13, 2026 through Monday, April 20, 2026. New issues and PRs from unapproved contributors are auto-closed during this time. Approved contributors can still open issues and PRs if something is genuinely urgent, but please keep that to pressing matters only. For support, join [Discord](https://discord.com/invite/3cU7Bz4UPx).
-<!-- OSS_WEEKEND_END -->
-
----
-
 <p align="center">
-  <a href="https://shittycodingagent.ai">
-    <img src="https://shittycodingagent.ai/logo.svg" alt="pi logo" width="128">
+  <a href="https://pi.dev">
+    <img src="https://pi.dev/logo.svg" alt="pi logo" width="128">
   </a>
 </p>
 <p align="center">
@@ -23,6 +13,10 @@ OSS weekend runs Monday, April 13, 2026 through Monday, April 20, 2026. New issu
   <br /><br />
   <a href="https://exe.dev"><img src="docs/images/exy.png" alt="Exy mascot" width="48" /><br />exe.dev</a>
 </p>
+
+> New issues and PRs from new contributors are auto-closed by default. Maintainers review auto-closed issues daily. See [CONTRIBUTING.md](../../CONTRIBUTING.md).
+
+---
 
 Pi is a minimal terminal coding harness. Adapt pi to your workflows, not the other way around, without having to fork and modify pi internals. Extend it with TypeScript [Extensions](#extensions), [Skills](#skills), [Prompt Templates](#prompt-templates), and [Themes](#themes). Put your extensions, skills, prompt templates, and themes in [Pi Packages](#pi-packages) and share them with others via npm or git.
 
@@ -113,6 +107,7 @@ For each built-in provider, pi maintains a list of tool-capable models, updated 
 - Anthropic
 - OpenAI
 - Azure OpenAI
+- DeepSeek
 - Google Gemini
 - Google Vertex
 - Amazon Bedrock
@@ -126,6 +121,7 @@ For each built-in provider, pi maintains a list of tool-capable models, updated 
 - OpenCode Zen
 - OpenCode Go
 - Hugging Face
+- Fireworks
 - Kimi For Coding
 - MiniMax
 
@@ -173,9 +169,10 @@ Type `/` in the editor to trigger commands. [Extensions](#extensions) can regist
 | `/resume` | Pick from previous sessions |
 | `/new` | Start a new session |
 | `/name <name>` | Set session display name |
-| `/session` | Show session info (path, tokens, cost) |
+| `/session` | Show session info (file, ID, messages, tokens, cost) |
 | `/tree` | Jump to any point in the session and continue from there |
-| `/fork` | Create a new session from the current branch |
+| `/fork` | Create a new session from a previous user message |
+| `/clone` | Duplicate the current active branch into a new session |
 | `/compact [prompt]` | Manually compact context, optional custom instructions |
 | `/copy` | Copy last assistant message to clipboard |
 | `/export [file]` | Export session to HTML file |
@@ -230,9 +227,11 @@ Sessions auto-save to `~/.pi/agent/sessions/` organized by working directory.
 pi -c                  # Continue most recent session
 pi -r                  # Browse and select from past sessions
 pi --no-session        # Ephemeral mode (don't save)
-pi --session <path>    # Use specific session file or ID
-pi --fork <path>       # Fork specific session file or ID into a new session
+pi --session <path|id> # Use specific session file or ID
+pi --fork <path|id>    # Fork specific session file or ID into a new session
 ```
+
+Use `/session` in interactive mode to see the current session ID before reusing it with `--session <id>` or `--fork <id>`.
 
 ### Branching
 
@@ -244,7 +243,9 @@ pi --fork <path>       # Fork specific session file or ID into a new session
 - Filter modes (Ctrl+O): default → no-tools → user-only → labeled-only → all
 - Press Shift+L to label entries as bookmarks and Shift+T to toggle label timestamps
 
-**`/fork`** - Create a new session file from the current branch. Opens a selector, copies history up to the selected point, and places that message in the editor for modification.
+**`/fork`** - Create a new session file from a previous user message on the active branch. Opens a selector, copies the active path up to that point, and places the selected prompt in the editor for modification.
+
+**`/clone`** - Duplicate the current active branch into a new session file at the current position. The new session keeps the full active-path history and opens with an empty editor.
 
 **`--fork <path|id>`** - Fork an existing session file or partial session UUID directly from the CLI. This copies the full source session into a new session file in the current project.
 
@@ -283,6 +284,8 @@ Pi loads `AGENTS.md` (or `CLAUDE.md`) at startup from:
 - Current directory
 
 Use for project instructions, conventions, common commands. All matching files are concatenated.
+
+Disable context file loading with `--no-context-files` (or `-nc`).
 
 ### System Prompt
 
@@ -334,6 +337,8 @@ export default function (pi: ExtensionAPI) {
 }
 ```
 
+The default export can also be `async`. pi waits for async extension factories before startup continues, which is useful for one-time initialization such as fetching remote model lists before calling `pi.registerProvider()`.
+
 **What's possible:**
 - Custom tools (or replace built-in tools entirely)
 - Sub-agents and plan mode
@@ -380,7 +385,7 @@ pi update                               # skips pinned packages
 pi config                               # enable/disable extensions, skills, prompts, themes
 ```
 
-Packages install to `~/.pi/agent/git/` (git) or global npm. Use `-l` for project-local installs (`.pi/git/`, `.pi/npm/`). If you use a Node version manager and want package installs to reuse a stable npm context, set `npmCommand` in `settings.json`, for example `["mise", "exec", "node@20", "--", "npm"]`.
+Packages install to `~/.pi/agent/git/` (git) or global npm. Use `-l` for project-local installs (`.pi/git/`, `.pi/npm/`). Git packages install dependencies with `npm install --omit=dev` by default, so runtime deps must be listed under `dependencies`; when `npmCommand` is configured, git packages use plain `install` for compatibility with wrappers. If you use a Node version manager and want package installs to reuse a stable npm context, set `npmCommand` in `settings.json`, for example `["mise", "exec", "node@20", "--", "npm"]`.
 
 Create a package by adding a `pi` key to `package.json`:
 
@@ -509,8 +514,8 @@ cat README.md | pi -p "Summarize this text"
 |--------|-------------|
 | `-c`, `--continue` | Continue most recent session |
 | `-r`, `--resume` | Browse and select session |
-| `--session <path>` | Use specific session file or partial UUID |
-| `--fork <path>` | Fork specific session file or partial UUID into a new session |
+| `--session <path\|id>` | Use specific session file or partial UUID |
+| `--fork <path\|id>` | Fork specific session file or partial UUID into a new session |
 | `--session-dir <dir>` | Custom session storage directory |
 | `--no-session` | Ephemeral mode (don't save) |
 
@@ -518,8 +523,9 @@ cat README.md | pi -p "Summarize this text"
 
 | Option | Description |
 |--------|-------------|
-| `--tools <list>` | Enable specific built-in tools (default: `read,bash,edit,write`) |
-| `--no-tools` | Disable all built-in tools (extension tools still work) |
+| `--tools <list>`, `-t <list>` | Allowlist specific tool names across built-in, extension, and custom tools |
+| `--no-builtin-tools`, `-nbt` | Disable built-in tools by default but keep extension/custom tools enabled |
+| `--no-tools`, `-nt` | Disable all tools by default |
 
 Available built-in tools: `read`, `bash`, `edit`, `write`, `grep`, `find`, `ls`
 
@@ -535,6 +541,7 @@ Available built-in tools: `read`, `bash`, `edit`, `write`, `grep`, `find`, `ls`
 | `--no-prompt-templates` | Disable prompt template discovery |
 | `--theme <path>` | Load theme (repeatable) |
 | `--no-themes` | Disable theme discovery |
+| `--no-context-files`, `-nc` | Disable AGENTS.md and CLAUDE.md context file discovery |
 
 Combine `--no-*` with explicit flags to load exactly what you need, ignoring settings.json (e.g., `--no-extensions -e ./my-ext.ts`).
 

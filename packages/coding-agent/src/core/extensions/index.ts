@@ -20,6 +20,7 @@ export type {
 } from "./runner.js";
 export { ExtensionRunner } from "./runner.js";
 export type {
+	AfterProviderResponseEvent,
 	AgentEndEvent,
 	AgentStartEvent,
 	// Re-exports
@@ -28,6 +29,7 @@ export type {
 	AppendEntryHandler,
 	// App keybindings (for custom editors)
 	AppKeybinding,
+	AutocompleteProviderFactory,
 	// Events - Tool (ToolCallEvent types)
 	BashToolCallEvent,
 	BashToolResultEvent,
@@ -35,6 +37,7 @@ export type {
 	BeforeAgentStartEventResult,
 	BeforeProviderRequestEvent,
 	BeforeProviderRequestEventResult,
+	BuildSystemPromptOptions,
 	// Context
 	CompactOptions,
 	// Events - Agent
@@ -103,6 +106,7 @@ export type {
 	// Commands
 	RegisteredCommand,
 	RegisteredTool,
+	ReplacedSessionContext,
 	ResolvedCommand,
 	// Events - Resources
 	ResourcesDiscoverEvent,
@@ -135,6 +139,8 @@ export type {
 	ToolDefinition,
 	// Events - Tool Execution
 	ToolExecutionEndEvent,
+	// Tool execution mode
+	ToolExecutionMode,
 	ToolExecutionStartEvent,
 	ToolExecutionUpdateEvent,
 	ToolInfo,
@@ -148,6 +154,7 @@ export type {
 	UserBashEvent,
 	UserBashEventResult,
 	WidgetPlacement,
+	WorkingIndicatorOptions,
 	WriteToolCallEvent,
 	WriteToolResultEvent,
 } from "./types.js";
