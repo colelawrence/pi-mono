@@ -9,7 +9,7 @@ import { spawn } from "child_process";
 import { keyHint } from "../../modes/interactive/components/keybinding-hints.js";
 import { truncateToVisualLines } from "../../modes/interactive/components/visual-truncate.js";
 import { theme } from "../../modes/interactive/theme/theme.js";
-import { waitForChildProcess } from "../../utils/child-process.js";
+import { type ChildProcessWaitResult, waitForChildProcess } from "../../utils/child-process.js";
 import { getShellConfig, getShellEnv, killProcessTree } from "../../utils/shell.js";
 import type { ToolDefinition, ToolRenderResultOptions } from "../extensions/types.js";
 import { getTextOutput, invalidArgText, str } from "./render-utils.js";
@@ -31,9 +31,59 @@ const bashSchema = Type.Object({
 
 export type BashToolInput = Static<typeof bashSchema>;
 
+export interface BashExecutionMetadata {
+	shellPath?: string;
+	shellArgs?: ReadonlyArray<string>;
+	cwd: string;
+	commandPrefixPresent?: boolean;
+	timeoutSeconds?: number;
+	exitCode?: number | null;
+	outputBytes?: number;
+	stdoutBytes?: number;
+	stderrBytes?: number;
+	stdoutEnded?: boolean;
+	stderrEnded?: boolean;
+	finalizedBy?: ChildProcessWaitResult["finalizedBy"];
+	nonzeroWithoutOutput?: boolean;
+	spawnErrorMessage?: string;
+}
+
 export interface BashToolDetails {
 	truncation?: TruncationResult;
 	fullOutputPath?: string;
+	telemetry?: BashExecutionMetadata;
+}
+
+export interface BashToolExecutionError<TDetails = unknown> extends Error {
+	content?: Array<{ type: "text"; text: string }>;
+	details?: TDetails;
+	bashExecutionMetadata?: BashExecutionMetadata;
+}
+
+function getBashExecutionMetadata(error: unknown): BashExecutionMetadata | undefined {
+	if (!error || typeof error !== "object") return undefined;
+	const metadata = (error as BashToolExecutionError).bashExecutionMetadata;
+	return metadata && typeof metadata === "object" ? metadata : undefined;
+}
+
+function createBashExecutionError(
+	message: string,
+	details: BashToolDetails | undefined,
+): BashToolExecutionError<BashToolDetails> {
+	const error = new Error(message) as BashToolExecutionError<BashToolDetails>;
+	error.content = [{ type: "text", text: message }];
+	error.details = details;
+	return error;
+}
+
+function attachBashExecutionMetadata(error: unknown, metadata: BashExecutionMetadata): BashToolExecutionError {
+	const tagged = (error instanceof Error ? error : new Error(String(error))) as BashToolExecutionError;
+	tagged.bashExecutionMetadata = metadata;
+	return tagged;
+}
+
+function isBashToolExecutionError(error: unknown): error is BashToolExecutionError<BashToolDetails> {
+	return Boolean(error && typeof error === "object" && Array.isArray((error as BashToolExecutionError).content));
 }
 
 /**
@@ -57,7 +107,7 @@ export interface BashOperations {
 			timeout?: number;
 			env?: NodeJS.ProcessEnv;
 		},
-	) => Promise<{ exitCode: number | null }>;
+	) => Promise<{ exitCode: number | null; metadata?: BashExecutionMetadata }>;
 }
 
 /**
@@ -83,6 +133,29 @@ export function createLocalBashOperations(): BashOperations {
 				});
 				let timedOut = false;
 				let timeoutHandle: NodeJS.Timeout | undefined;
+				let stdoutBytes = 0;
+				let stderrBytes = 0;
+				const buildMetadata = (
+					waitResult?: ChildProcessWaitResult,
+					extra: Partial<BashExecutionMetadata> = {},
+				): BashExecutionMetadata => ({
+					shellPath: shell,
+					shellArgs: args,
+					cwd,
+					timeoutSeconds: timeout,
+					outputBytes: stdoutBytes + stderrBytes,
+					stdoutBytes,
+					stderrBytes,
+					...(waitResult
+						? {
+								exitCode: waitResult.exitCode,
+								stdoutEnded: waitResult.stdoutEnded,
+								stderrEnded: waitResult.stderrEnded,
+								finalizedBy: waitResult.finalizedBy,
+							}
+						: {}),
+					...extra,
+				});
 				// Set timeout if provided.
 				if (timeout !== undefined && timeout > 0) {
 					timeoutHandle = setTimeout(() => {
@@ -91,8 +164,14 @@ export function createLocalBashOperations(): BashOperations {
 					}, timeout * 1000);
 				}
 				// Stream stdout and stderr.
-				child.stdout?.on("data", onData);
-				child.stderr?.on("data", onData);
+				child.stdout?.on("data", (data: Buffer) => {
+					stdoutBytes += data.length;
+					onData(data);
+				});
+				child.stderr?.on("data", (data: Buffer) => {
+					stderrBytes += data.length;
+					onData(data);
+				});
 				// Handle abort signal by killing the entire process tree.
 				const onAbort = () => {
 					if (child.pid) killProcessTree(child.pid);
@@ -104,23 +183,28 @@ export function createLocalBashOperations(): BashOperations {
 				// Handle shell spawn errors and wait for the process to terminate without hanging
 				// on inherited stdio handles held by detached descendants.
 				waitForChildProcess(child)
-					.then((code) => {
+					.then((waitResult) => {
 						if (timeoutHandle) clearTimeout(timeoutHandle);
 						if (signal) signal.removeEventListener("abort", onAbort);
 						if (signal?.aborted) {
-							reject(new Error("aborted"));
+							reject(attachBashExecutionMetadata(new Error("aborted"), buildMetadata(waitResult)));
 							return;
 						}
 						if (timedOut) {
-							reject(new Error(`timeout:${timeout}`));
+							reject(attachBashExecutionMetadata(new Error(`timeout:${timeout}`), buildMetadata(waitResult)));
 							return;
 						}
-						resolve({ exitCode: code });
+						resolve({
+							exitCode: waitResult.exitCode,
+							metadata: buildMetadata(waitResult),
+						});
 					})
 					.catch((err) => {
 						if (timeoutHandle) clearTimeout(timeoutHandle);
 						if (signal) signal.removeEventListener("abort", onAbort);
-						reject(err);
+						reject(
+							attachBashExecutionMetadata(err, buildMetadata(undefined, { spawnErrorMessage: String(err) })),
+						);
 					});
 			});
 		},
@@ -299,6 +383,21 @@ export function createBashToolDefinition(
 					for (const chunk of chunks) tempFileStream.write(chunk);
 				};
 
+				const buildDetails = (
+					truncation: TruncationResult,
+					executionMetadata: Partial<BashExecutionMetadata> = {},
+				): BashToolDetails => ({
+					truncation: truncation.truncated ? truncation : undefined,
+					fullOutputPath: tempFilePath,
+					telemetry: {
+						cwd: spawnContext.cwd,
+						commandPrefixPresent: Boolean(commandPrefix),
+						timeoutSeconds: timeout,
+						outputBytes: executionMetadata.outputBytes ?? totalBytes,
+						...executionMetadata,
+					},
+				});
+
 				const handleData = (data: Buffer) => {
 					totalBytes += data.length;
 					// Start writing to a temp file once output exceeds the in-memory threshold.
@@ -325,10 +424,7 @@ export function createBashToolDefinition(
 						}
 						onUpdate({
 							content: [{ type: "text", text: truncation.content || "" }],
-							details: {
-								truncation: truncation.truncated ? truncation : undefined,
-								fullOutputPath: tempFilePath,
-							},
+							details: buildDetails(truncation),
 						});
 					}
 				};
@@ -339,7 +435,7 @@ export function createBashToolDefinition(
 					timeout,
 					env: spawnContext.env,
 				})
-					.then(({ exitCode }) => {
+					.then(({ exitCode, metadata }) => {
 						// Combine the rolling buffer chunks.
 						const fullBuffer = Buffer.concat(chunks);
 						const fullOutput = fullBuffer.toString("utf-8");
@@ -351,10 +447,12 @@ export function createBashToolDefinition(
 						// Close temp file stream before building the final result.
 						if (tempFileStream) tempFileStream.end();
 						let outputText = truncation.content || "(no output)";
-						let details: BashToolDetails | undefined;
+						const details = buildDetails(truncation, {
+							...metadata,
+							exitCode,
+							nonzeroWithoutOutput: Boolean(exitCode && !fullOutput.trim()),
+						});
 						if (truncation.truncated) {
-							// Build truncation details and an actionable notice.
-							details = { truncation, fullOutputPath: tempFilePath };
 							const startLine = truncation.totalLines - truncation.outputLines + 1;
 							const endLine = truncation.totalLines;
 							if (truncation.lastLinePartial) {
@@ -369,27 +467,43 @@ export function createBashToolDefinition(
 						}
 						if (exitCode !== 0 && exitCode !== null) {
 							outputText += `\n\nCommand exited with code ${exitCode}`;
-							reject(new Error(outputText));
+							reject(createBashExecutionError(outputText, details));
 						} else {
 							resolve({ content: [{ type: "text", text: outputText }], details });
 						}
 					})
 					.catch((err: Error) => {
+						if (isBashToolExecutionError(err)) {
+							reject(err);
+							return;
+						}
 						// Close temp file stream and include buffered output in the error message.
 						if (tempFileStream) tempFileStream.end();
 						const fullBuffer = Buffer.concat(chunks);
-						let output = fullBuffer.toString("utf-8");
+						const fullOutput = fullBuffer.toString("utf-8");
+						const truncation = truncateTail(fullOutput);
+						if (truncation.truncated) {
+							ensureTempFile();
+						}
+						let output = fullOutput;
+						const executionMetadata = getBashExecutionMetadata(err);
+						const details = buildDetails(truncation, {
+							...executionMetadata,
+							nonzeroWithoutOutput: executionMetadata?.nonzeroWithoutOutput ?? Boolean(!fullOutput.trim()),
+							spawnErrorMessage: executionMetadata?.spawnErrorMessage ?? err.message,
+						});
 						if (err.message === "aborted") {
 							if (output) output += "\n\n";
 							output += "Command aborted";
-							reject(new Error(output));
+							reject(createBashExecutionError(output, details));
 						} else if (err.message.startsWith("timeout:")) {
 							const timeoutSecs = err.message.split(":")[1];
 							if (output) output += "\n\n";
 							output += `Command timed out after ${timeoutSecs} seconds`;
-							reject(new Error(output));
+							reject(createBashExecutionError(output, details));
 						} else {
-							reject(err);
+							const message = output ? `${output}\n\n${err.message}` : err.message;
+							reject(createBashExecutionError(message, details));
 						}
 					});
 			});

@@ -89,12 +89,12 @@ export async function execCommand(
 		// Wait for process termination without hanging on inherited stdio handles
 		// held open by detached descendants.
 		waitForChildProcess(proc)
-			.then((code) => {
+			.then(({ exitCode }) => {
 				if (timeoutId) clearTimeout(timeoutId);
 				if (options?.signal) {
 					options.signal.removeEventListener("abort", killProcess);
 				}
-				resolve({ stdout, stderr, code: code ?? 0, killed });
+				resolve({ stdout, stderr, code: exitCode ?? 0, killed });
 			})
 			.catch((_err) => {
 				if (timeoutId) clearTimeout(timeoutId);

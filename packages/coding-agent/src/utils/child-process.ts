@@ -2,6 +2,13 @@ import type { ChildProcess } from "node:child_process";
 
 const EXIT_STDIO_GRACE_MS = 100;
 
+export interface ChildProcessWaitResult {
+	exitCode: number | null;
+	finalizedBy: "close" | "exit_stdio_end" | "exit_grace_timeout";
+	stdoutEnded: boolean;
+	stderrEnded: boolean;
+}
+
 /**
  * Wait for a child process to terminate without hanging on inherited stdio handles.
  *
@@ -10,7 +17,7 @@ const EXIT_STDIO_GRACE_MS = 100;
  * though the original process is already gone. We wait briefly for stdio to end,
  * then forcibly stop tracking the inherited handles.
  */
-export function waitForChildProcess(child: ChildProcess): Promise<number | null> {
+export function waitForChildProcess(child: ChildProcess): Promise<ChildProcessWaitResult> {
 	return new Promise((resolve, reject) => {
 		let settled = false;
 		let exited = false;
@@ -31,19 +38,24 @@ export function waitForChildProcess(child: ChildProcess): Promise<number | null>
 			child.stderr?.removeListener("end", onStderrEnd);
 		};
 
-		const finalize = (code: number | null) => {
+		const finalize = (code: number | null, finalizedBy: ChildProcessWaitResult["finalizedBy"]) => {
 			if (settled) return;
 			settled = true;
 			cleanup();
 			child.stdout?.destroy();
 			child.stderr?.destroy();
-			resolve(code);
+			resolve({
+				exitCode: code,
+				finalizedBy,
+				stdoutEnded,
+				stderrEnded,
+			});
 		};
 
 		const maybeFinalizeAfterExit = () => {
 			if (!exited || settled) return;
 			if (stdoutEnded && stderrEnded) {
-				finalize(exitCode);
+				finalize(exitCode, "exit_stdio_end");
 			}
 		};
 
@@ -69,12 +81,12 @@ export function waitForChildProcess(child: ChildProcess): Promise<number | null>
 			exitCode = code;
 			maybeFinalizeAfterExit();
 			if (!settled) {
-				postExitTimer = setTimeout(() => finalize(code), EXIT_STDIO_GRACE_MS);
+				postExitTimer = setTimeout(() => finalize(code, "exit_grace_timeout"), EXIT_STDIO_GRACE_MS);
 			}
 		};
 
 		const onClose = (code: number | null) => {
-			finalize(code);
+			finalize(code, "close");
 		};
 
 		child.stdout?.once("end", onStdoutEnd);

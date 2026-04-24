@@ -455,6 +455,12 @@ type ExecutedToolCallOutcome = {
 	isError: boolean;
 };
 
+type StructuredToolExecutionError = {
+	message?: unknown;
+	content?: unknown;
+	details?: unknown;
+};
+
 function prepareToolCallArguments(tool: AgentTool<any>, toolCall: AgentToolCall): AgentToolCall {
 	if (!tool.prepareArguments) {
 		return toolCall;
@@ -521,6 +527,36 @@ async function prepareToolCall(
 	}
 }
 
+function extractStructuredToolExecutionError(error: unknown): AgentToolResult<any> | undefined {
+	if (!error || typeof error !== "object") return undefined;
+
+	const structured = error as StructuredToolExecutionError;
+	const message =
+		error instanceof Error
+			? error.message
+			: typeof structured.message === "string"
+				? structured.message
+				: String(error);
+	const content = Array.isArray(structured.content) ? structured.content : undefined;
+	const details = structured.details ?? {};
+
+	if (!content) {
+		if (structured.details === undefined) return undefined;
+		return {
+			content: [{ type: "text", text: message }],
+			details,
+		};
+	}
+
+	const validContent = content.every((item) => item && typeof item === "object" && typeof item.type === "string");
+	if (!validContent) return undefined;
+
+	return {
+		content: content as AgentToolResult<any>["content"],
+		details,
+	};
+}
+
 async function executePreparedToolCall(
 	prepared: PreparedToolCall,
 	signal: AbortSignal | undefined,
@@ -552,7 +588,9 @@ async function executePreparedToolCall(
 	} catch (error) {
 		await Promise.all(updateEvents);
 		return {
-			result: createErrorToolResult(error instanceof Error ? error.message : String(error)),
+			result:
+				extractStructuredToolExecutionError(error) ??
+				createErrorToolResult(error instanceof Error ? error.message : String(error)),
 			isError: true,
 		};
 	}
