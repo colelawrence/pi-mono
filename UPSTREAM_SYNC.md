@@ -15,7 +15,8 @@ This repo tracks upstream Pi while carrying a small set of local patches.
 ```bash
 cd .references/pi-mono-effect
 
-git fetch upstream origin --tags
+git fetch upstream --tags
+git fetch origin --tags
 git switch effect-native-core
 git switch -c sync/upstream-YYYY-MM-DD
 
@@ -91,20 +92,23 @@ cd packages/tui
 node --test --import tsx test/tui-render.test.ts
 ```
 
-### `packages/coding-agent/src/core/agent-session.ts`, `packages/coding-agent/src/core/session-runtime.ts`, `packages/coding-agent/src/core/user-turn-ready.ts`
+### `packages/coding-agent/src/core/agent-session.ts`, `packages/coding-agent/src/core/agent-session-runtime.ts`, `packages/coding-agent/src/core/extensions/runner.ts`, `packages/coding-agent/src/core/user-turn-ready.ts`
 Intent:
 - Keep the downstream epi session-runtime bridge integrated with AgentSession lifecycle changes.
+- Preserve downstream lifecycle fencing and guarded session replacement around reload/new/resume/fork.
+- Preserve downstream epi runtime exposure on extension contexts alongside upstream stale-context protections.
 - Preserve downstream `epi_user_turn_ready` emission without forking upstream turn/session control flow more than necessary.
 
 Resolution pattern:
-- Prefer upstream AgentSession structure and control flow.
+- Prefer upstream AgentSession / AgentSessionRuntime / ExtensionRunner structure and control flow.
 - Keep downstream behavior concentrated in additive runtime helpers and narrowly-scoped hooks instead of broad inline rewrites.
-- If upstream exposes a cleaner seam, move this carry out of `agent-session.ts`.
+- In `runner.ts`, keep upstream guarded getter-based contexts and reapply epi runtime exposure as a small additive symbol injection.
+- If upstream exposes a cleaner seam, move this carry out of `agent-session.ts` / `runner.ts`.
 
 Verification:
 ```bash
 cd packages/coding-agent
-npx vitest --run test/user-turn-ready.test.ts test/agent-session-runtime-invariants.test.ts test/trigger-compact-extension.test.ts
+npx tsx ../../node_modules/vitest/dist/cli.js --run test/host-capabilities.test.ts test/trigger-compact-extension.test.ts test/user-turn-ready.test.ts test/agent-session-runtime-invariants.test.ts test/suite/agent-session-runtime.test.ts
 ```
 
 ### `packages/coding-agent/src/core/extensions/loader.ts`, `packages/coding-agent/src/core/extensions/host-capabilities.ts`
@@ -120,7 +124,23 @@ Resolution pattern:
 Verification:
 ```bash
 cd packages/coding-agent
-npx vitest --run test/host-capabilities.test.ts
+npx tsx ../../node_modules/vitest/dist/cli.js --run test/host-capabilities.test.ts
+```
+
+### `packages/agent/src/proxy.ts`
+Intent:
+- Keep the upstream proxy request payload shape and forwarded options current.
+- Preserve downstream structural proxy fetch/reader typing needed for tsgo to build cleanly.
+
+Resolution pattern:
+- Prefer upstream request option factoring and payload shape.
+- Reapply downstream structural response/reader types as a narrow additive typing shim around `fetch()`.
+- Avoid broader refactors here; the carry should stay limited to the typing boundary.
+
+Verification:
+```bash
+cd packages/agent
+npm run build
 ```
 
 ## Generated file policy
@@ -160,6 +180,10 @@ cd .references/pi-mono-effect
 # If installing epi / coding-agent changed
 ./install-epi.sh
 ```
+
+If you verify from a fresh temporary worktree:
+- run a local `npm install` in that worktree first
+- if package-based tests or `npm run check` fail on missing workspace entrypoints, build the depended-on workspace package(s) in that worktree (commonly `packages/tui`, `packages/ai`, or `packages/web-ui`) before retrying
 
 ## Long-term maintenance guidance
 
@@ -329,3 +353,31 @@ If a sync exposed a recurring conflict pattern, confusing decision point, or bet
   - repeated friction: package-based tests and workspace typechecks in a temporary worktree still need local built `dist/` outputs for workspace imports such as `@mariozechner/pi-ai`, `@mariozechner/pi-tui`, and `@mariozechner/pi-web-ui`
   - next carry to reduce: keep chasing smaller seams for the coding-agent carries so future syncs keep landing as package/version bumps instead of core-file conflicts
   - process update: when root `npm run check` fails in a temporary worktree on missing workspace package entrypoints, build the depended-on workspace package in that worktree before retrying the check
+
+## Sync 2026-04-24
+- merged: `upstream/main @ 91154d97`
+- branch: `sync/upstream-2026-04-24`
+- conflicts:
+  - `AGENTS.md` — kept downstream upstream-sync / first-message rules and merged upstream conversational-style + contribution-gate guidance
+  - `packages/agent/src/proxy.ts` — kept upstream proxy request option shaping and reapplied downstream structural fetch/reader typing for tsgo
+  - `packages/coding-agent/src/core/agent-session-runtime.ts` — kept upstream session-shutdown reason / target-session plumbing and reapplied downstream lifecycle fencing before invalidation
+  - `packages/coding-agent/src/core/agent-session.ts` — kept upstream prompt/system-prompt/reload structure and reapplied downstream `runPromptCycle`, epi runtime bridge, and `epi_user_turn_ready` hook
+  - `packages/coding-agent/src/core/extensions/runner.ts` — kept upstream stale-context guarded getter contexts and reapplied downstream epi runtime symbol injection + host-capabilities exposure
+  - `packages/coding-agent/src/modes/interactive/interactive-mode.ts` — kept upstream interactive-mode changes and reapplied downstream hidden custom-message visibility
+  - `packages/coding-agent/test/suite/agent-session-runtime.test.ts` — kept downstream lifecycle-fence / stale-retry regressions and adopted upstream runtime-cwd wording
+  - `packages/agent/package.json`, `packages/coding-agent/package.json`, `package-lock.json` — updated to upstream `0.70.2` workspace deps, kept downstream-required `@opentelemetry/api` and coding-agent `@sinclair/typebox`, and dropped the no-longer-needed agent-side legacy TypeBox dep
+- verification:
+  - [x] `cd packages/coding-agent && npx tsx ../../node_modules/vitest/dist/cli.js --run test/host-capabilities.test.ts test/trigger-compact-extension.test.ts test/user-turn-ready.test.ts test/agent-session-runtime-invariants.test.ts test/suite/agent-session-runtime.test.ts`
+  - [x] `cd packages/tui && node --test --import tsx test/tui-render.test.ts`
+  - [x] `cd packages/agent && npm run build`
+  - [x] `./install-epi.sh`
+  - [x] `npm run check`
+- notes:
+  - current carry patches still expected: `packages/tui/src/tui.ts` for loud-but-non-fatal render failures/overwide lines, `packages/coding-agent/src/core/agent-session.ts` / `agent-session-runtime.ts` / `extensions/runner.ts` / `user-turn-ready.ts` for epi runtime + lifecycle fence + turn-ready integration, `packages/coding-agent/src/core/extensions/loader.ts` / `host-capabilities.ts` for downstream host-capability + layered-extension support, and `packages/agent/src/proxy.ts` for structural proxy typing
+  - `packages/ai/src/models.generated.ts` changed as part of the upstream merge state; the additional live-catalog regeneration from `npm install` / `./install-epi.sh` should be dropped before finishing the sync so the merge does not carry extra incidental churn
+  - this sync was prepared in a temporary worktree because the primary checkout had pre-existing local dirt in `packages/agent/src/agent-loop.ts`, `packages/coding-agent/src/core/exec.ts`, `packages/coding-agent/src/core/tools/bash.ts`, `packages/coding-agent/src/utils/child-process.ts`, and related new tests
+- reflection:
+  - surprisingly easy: most upstream churn outside the active carry files auto-merged cleanly once the temporary worktree had a real local install
+  - repeated friction: Vite / tsgo verification in a temporary worktree still depends on local built workspace entrypoints (`packages/tui`, `packages/ai`, `packages/web-ui`) before coding-agent tests or root `npm run check` can run cleanly
+  - next carry to reduce: move epi runtime symbol exposure and lifecycle fencing farther out of `agent-session.ts` / `runner.ts`, and reassess whether coding-agent still needs the legacy `@sinclair/typebox` runtime dependency once loader/tests no longer require it
+  - process update: the default fetch command in this file was wrong (`git fetch upstream origin --tags`); keep the per-remote fetch form, and expect fresh temporary worktrees to need both `npm install` and a few dependent workspace builds before verification is trustworthy
