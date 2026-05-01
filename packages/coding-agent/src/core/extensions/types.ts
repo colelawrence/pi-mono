@@ -115,6 +115,7 @@ export interface WorkingIndicatorOptions {
 
 /** Wrap the current autocomplete provider with additional behavior. */
 export type AutocompleteProviderFactory = (current: AutocompleteProvider) => AutocompleteProvider;
+export type EditorFactory = (tui: TUI, theme: EditorTheme, keybindings: KeybindingsManager) => EditorComponent;
 
 /**
  * UI context for extensions to request interactive UI.
@@ -141,6 +142,9 @@ export interface ExtensionUIContext {
 
 	/** Set the working/loading message shown during streaming. Call with no argument to restore default. */
 	setWorkingMessage(message?: string): void;
+
+	/** Show or hide the built-in interactive working loader row during streaming. */
+	setWorkingVisible(visible: boolean): void;
 
 	/**
 	 * Configure the interactive working indicator shown during streaming.
@@ -246,9 +250,10 @@ export interface ExtensionUIContext {
 	 * );
 	 * ```
 	 */
-	setEditorComponent(
-		factory: ((tui: TUI, theme: EditorTheme, keybindings: KeybindingsManager) => EditorComponent) | undefined,
-	): void;
+	setEditorComponent(factory: EditorFactory | undefined): void;
+
+	/** Get the currently configured custom editor factory, or undefined when using the default editor. */
+	getEditorComponent(): EditorFactory | undefined;
 
 	/** Get the current theme for styling. */
 	readonly theme: Theme;
@@ -733,6 +738,13 @@ export interface ModelSelectEvent {
 	source: ModelSelectSource;
 }
 
+/** Fired when a new thinking level is selected */
+export interface ThinkingLevelSelectEvent {
+	type: "thinking_level_select";
+	level: ThinkingLevel;
+	previousLevel: ThinkingLevel;
+}
+
 // ============================================================================
 // User Bash Events
 // ============================================================================
@@ -974,6 +986,7 @@ export type ExtensionEvent =
 	| ToolExecutionUpdateEvent
 	| ToolExecutionEndEvent
 	| ModelSelectEvent
+	| ThinkingLevelSelectEvent
 	| UserBashEvent
 	| InputEvent
 	| ToolCallEvent
@@ -1007,6 +1020,11 @@ export interface ToolResultEventResult {
 	content?: (TextContent | ImageContent)[];
 	details?: unknown;
 	isError?: boolean;
+}
+
+export interface MessageEndEventResult {
+	/** Replace the finalized message. The replacement must keep the original message role. */
+	message?: AgentMessage;
 }
 
 export interface BeforeAgentStartEventResult {
@@ -1118,11 +1136,12 @@ export interface ExtensionAPI {
 	on(event: "turn_end", handler: ExtensionHandler<TurnEndEvent>): void;
 	on(event: "message_start", handler: ExtensionHandler<MessageStartEvent>): void;
 	on(event: "message_update", handler: ExtensionHandler<MessageUpdateEvent>): void;
-	on(event: "message_end", handler: ExtensionHandler<MessageEndEvent>): void;
+	on(event: "message_end", handler: ExtensionHandler<MessageEndEvent, MessageEndEventResult>): void;
 	on(event: "tool_execution_start", handler: ExtensionHandler<ToolExecutionStartEvent>): void;
 	on(event: "tool_execution_update", handler: ExtensionHandler<ToolExecutionUpdateEvent>): void;
 	on(event: "tool_execution_end", handler: ExtensionHandler<ToolExecutionEndEvent>): void;
 	on(event: "model_select", handler: ExtensionHandler<ModelSelectEvent>): void;
+	on(event: "thinking_level_select", handler: ExtensionHandler<ThinkingLevelSelectEvent>): void;
 	on(event: "tool_call", handler: ExtensionHandler<ToolCallEvent, ToolCallEventResult>): void;
 	on(event: "tool_result", handler: ExtensionHandler<ToolResultEvent, ToolResultEventResult>): void;
 	on(event: "user_bash", handler: ExtensionHandler<UserBashEvent, UserBashEventResult>): void;
@@ -1322,6 +1341,8 @@ export interface ExtensionAPI {
 
 /** Configuration for registering a provider via pi.registerProvider(). */
 export interface ProviderConfig {
+	/** Display name for the provider in UI. */
+	name?: string;
 	/** Base URL for the API endpoint. Required when defining models. */
 	baseUrl?: string;
 	/** API key or environment variable name. Required when defining models (unless oauth provided). */

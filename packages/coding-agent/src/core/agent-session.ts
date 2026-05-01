@@ -125,6 +125,8 @@ export type AgentSessionEvent =
 			followUp: readonly string[];
 	  }
 	| { type: "compaction_start"; reason: "manual" | "threshold" | "overflow" }
+	| { type: "session_info_changed"; name: string | undefined }
+	| { type: "thinking_level_changed"; level: ThinkingLevel }
 	| {
 			type: "compaction_end";
 			reason: "manual" | "threshold" | "overflow";
@@ -600,6 +602,22 @@ export class AgentSession {
 		return undefined;
 	}
 
+	private _replaceMessageInPlace(target: AgentMessage, replacement: AgentMessage): void {
+		// Agent-core stores the finalized message object in its state before emitting message_end.
+		// SessionManager persistence happens later in _processAgentEvent() with event.message.
+		// Mutating this object in place keeps agent state, later turn/agent events, listeners,
+		// and the eventual SessionManager.appendMessage(event.message) persistence in sync.
+		if (target === replacement) {
+			return;
+		}
+
+		const targetRecord = target as unknown as Record<string, unknown>;
+		for (const key of Object.keys(targetRecord)) {
+			delete targetRecord[key];
+		}
+		Object.assign(targetRecord, replacement);
+	}
+
 	/** Emit extension events based on agent events */
 	private async _emitExtensionEvent(event: AgentEvent): Promise<void> {
 		if (event.type === "agent_start") {
@@ -641,7 +659,10 @@ export class AgentSession {
 				type: "message_end",
 				message: event.message,
 			};
-			await this._extensionRunner.emit(extensionEvent);
+			const replacement = await this._extensionRunner.emitMessageEnd(extensionEvent);
+			if (replacement) {
+				this._replaceMessageInPlace(event.message, replacement);
+			}
 		} else if (event.type === "tool_execution_start") {
 			const extensionEvent: ToolExecutionStartEvent = {
 				type: "tool_execution_start",
@@ -1559,7 +1580,8 @@ export class AgentSession {
 		const effectiveLevel = availableLevels.includes(level) ? level : this._clampThinkingLevel(level, availableLevels);
 
 		// Only persist if actually changing
-		const isChanging = effectiveLevel !== this.agent.state.thinkingLevel;
+		const previousLevel = this.agent.state.thinkingLevel;
+		const isChanging = effectiveLevel !== previousLevel;
 
 		this.agent.state.thinkingLevel = effectiveLevel;
 
@@ -1568,6 +1590,12 @@ export class AgentSession {
 			if (this.supportsThinking() || effectiveLevel !== "off") {
 				this.settingsManager.setDefaultThinkingLevel(effectiveLevel);
 			}
+			this._emit({ type: "thinking_level_changed", level: effectiveLevel });
+			void this._extensionRunner.emit({
+				type: "thinking_level_select",
+				level: effectiveLevel,
+				previousLevel,
+			});
 		}
 	}
 
@@ -2237,7 +2265,7 @@ export class AgentSession {
 					this.sessionManager.appendCustomEntry(customType, data);
 				},
 				setSessionName: (name) => {
-					this.sessionManager.appendSessionInfo(name);
+					this.setSessionName(name);
 				},
 				getSessionName: () => {
 					return this.sessionManager.getSessionName();
@@ -2730,6 +2758,7 @@ export class AgentSession {
 	 */
 	setSessionName(name: string): void {
 		this.sessionManager.appendSessionInfo(name);
+		this._emit({ type: "session_info_changed", name: this.sessionManager.getSessionName() });
 	}
 
 	// =========================================================================
@@ -2793,136 +2822,144 @@ export class AgentSession {
 
 		// Set up abort controller for summarization
 		this._branchSummaryAbortController = new AbortController();
-		let extensionSummary: { summary: string; details?: unknown } | undefined;
-		let fromExtension = false;
 
-		// Emit session_before_tree event
-		if (this._extensionRunner.hasHandlers("session_before_tree")) {
-			const result = (await this._extensionRunner.emit({
-				type: "session_before_tree",
-				preparation,
-				signal: this._branchSummaryAbortController.signal,
-			})) as SessionBeforeTreeResult | undefined;
+		try {
+			let extensionSummary: { summary: string; details?: unknown } | undefined;
+			let fromExtension = false;
 
-			if (result?.cancel) {
-				return { cancelled: true };
+			// Emit session_before_tree event
+			if (this._extensionRunner.hasHandlers("session_before_tree")) {
+				const result = (await this._extensionRunner.emit({
+					type: "session_before_tree",
+					preparation,
+					signal: this._branchSummaryAbortController.signal,
+				})) as SessionBeforeTreeResult | undefined;
+
+				if (result?.cancel) {
+					return { cancelled: true };
+				}
+
+				if (result?.summary && options.summarize) {
+					extensionSummary = result.summary;
+					fromExtension = true;
+				}
+
+				// Allow extensions to override instructions and label
+				if (result?.customInstructions !== undefined) {
+					customInstructions = result.customInstructions;
+				}
+				if (result?.replaceInstructions !== undefined) {
+					replaceInstructions = result.replaceInstructions;
+				}
+				if (result?.label !== undefined) {
+					label = result.label;
+				}
 			}
 
-			if (result?.summary && options.summarize) {
-				extensionSummary = result.summary;
-				fromExtension = true;
+			// Run default summarizer if needed
+			let summaryText: string | undefined;
+			let summaryDetails: unknown;
+			if (options.summarize && entriesToSummarize.length > 0 && !extensionSummary) {
+				const model = this.model!;
+				const { apiKey, headers } = await this._getRequiredRequestAuth(model);
+				const branchSummarySettings = this.settingsManager.getBranchSummarySettings();
+				const result = await generateBranchSummary(entriesToSummarize, {
+					model,
+					apiKey,
+					headers,
+					signal: this._branchSummaryAbortController.signal,
+					customInstructions,
+					replaceInstructions,
+					reserveTokens: branchSummarySettings.reserveTokens,
+				});
+				if (result.aborted) {
+					return { cancelled: true, aborted: true };
+				}
+				if (result.error) {
+					throw new Error(result.error);
+				}
+				summaryText = result.summary;
+				summaryDetails = {
+					readFiles: result.readFiles || [],
+					modifiedFiles: result.modifiedFiles || [],
+				};
+			} else if (extensionSummary) {
+				summaryText = extensionSummary.summary;
+				summaryDetails = extensionSummary.details;
 			}
 
-			// Allow extensions to override instructions and label
-			if (result?.customInstructions !== undefined) {
-				customInstructions = result.customInstructions;
-			}
-			if (result?.replaceInstructions !== undefined) {
-				replaceInstructions = result.replaceInstructions;
-			}
-			if (result?.label !== undefined) {
-				label = result.label;
-			}
-		}
+			// Determine the new leaf position based on target type
+			let newLeafId: string | null;
+			let editorText: string | undefined;
 
-		// Run default summarizer if needed
-		let summaryText: string | undefined;
-		let summaryDetails: unknown;
-		if (options.summarize && entriesToSummarize.length > 0 && !extensionSummary) {
-			const model = this.model!;
-			const { apiKey, headers } = await this._getRequiredRequestAuth(model);
-			const branchSummarySettings = this.settingsManager.getBranchSummarySettings();
-			const result = await generateBranchSummary(entriesToSummarize, {
-				model,
-				apiKey,
-				headers,
-				signal: this._branchSummaryAbortController.signal,
-				customInstructions,
-				replaceInstructions,
-				reserveTokens: branchSummarySettings.reserveTokens,
+			if (targetEntry.type === "message" && targetEntry.message.role === "user") {
+				// User message: leaf = parent (null if root), text goes to editor
+				newLeafId = targetEntry.parentId;
+				editorText = this._extractUserMessageText(targetEntry.message.content);
+			} else if (targetEntry.type === "custom_message") {
+				// Custom message: leaf = parent (null if root), text goes to editor
+				newLeafId = targetEntry.parentId;
+				editorText =
+					typeof targetEntry.content === "string"
+						? targetEntry.content
+						: targetEntry.content
+								.filter((c): c is { type: "text"; text: string } => c.type === "text")
+								.map((c) => c.text)
+								.join("");
+			} else {
+				// Non-user message: leaf = selected node
+				newLeafId = targetId;
+			}
+
+			// Switch leaf (with or without summary)
+			// Summary is attached at the navigation target position (newLeafId), not the old branch
+			let summaryEntry: BranchSummaryEntry | undefined;
+			if (summaryText) {
+				// Create summary at target position (can be null for root)
+				const summaryId = this.sessionManager.branchWithSummary(
+					newLeafId,
+					summaryText,
+					summaryDetails,
+					fromExtension,
+				);
+				summaryEntry = this.sessionManager.getEntry(summaryId) as BranchSummaryEntry;
+
+				// Attach label to the summary entry
+				if (label) {
+					this.sessionManager.appendLabelChange(summaryId, label);
+				}
+			} else if (newLeafId === null) {
+				// No summary, navigating to root - reset leaf
+				this.sessionManager.resetLeaf();
+			} else {
+				// No summary, navigating to non-root
+				this.sessionManager.branch(newLeafId);
+			}
+
+			// Attach label to target entry when not summarizing (no summary entry to label)
+			if (label && !summaryText) {
+				this.sessionManager.appendLabelChange(targetId, label);
+			}
+
+			// Update agent state
+			const sessionContext = this.sessionManager.buildSessionContext();
+			this.agent.state.messages = sessionContext.messages;
+
+			// Emit session_tree event
+			await this._extensionRunner.emit({
+				type: "session_tree",
+				newLeafId: this.sessionManager.getLeafId(),
+				oldLeafId,
+				summaryEntry,
+				fromExtension: summaryText ? fromExtension : undefined,
 			});
+
+			// Emit to custom tools
+
+			return { editorText, cancelled: false, summaryEntry };
+		} finally {
 			this._branchSummaryAbortController = undefined;
-			if (result.aborted) {
-				return { cancelled: true, aborted: true };
-			}
-			if (result.error) {
-				throw new Error(result.error);
-			}
-			summaryText = result.summary;
-			summaryDetails = {
-				readFiles: result.readFiles || [],
-				modifiedFiles: result.modifiedFiles || [],
-			};
-		} else if (extensionSummary) {
-			summaryText = extensionSummary.summary;
-			summaryDetails = extensionSummary.details;
 		}
-
-		// Determine the new leaf position based on target type
-		let newLeafId: string | null;
-		let editorText: string | undefined;
-
-		if (targetEntry.type === "message" && targetEntry.message.role === "user") {
-			// User message: leaf = parent (null if root), text goes to editor
-			newLeafId = targetEntry.parentId;
-			editorText = this._extractUserMessageText(targetEntry.message.content);
-		} else if (targetEntry.type === "custom_message") {
-			// Custom message: leaf = parent (null if root), text goes to editor
-			newLeafId = targetEntry.parentId;
-			editorText =
-				typeof targetEntry.content === "string"
-					? targetEntry.content
-					: targetEntry.content
-							.filter((c): c is { type: "text"; text: string } => c.type === "text")
-							.map((c) => c.text)
-							.join("");
-		} else {
-			// Non-user message: leaf = selected node
-			newLeafId = targetId;
-		}
-
-		// Switch leaf (with or without summary)
-		// Summary is attached at the navigation target position (newLeafId), not the old branch
-		let summaryEntry: BranchSummaryEntry | undefined;
-		if (summaryText) {
-			// Create summary at target position (can be null for root)
-			const summaryId = this.sessionManager.branchWithSummary(newLeafId, summaryText, summaryDetails, fromExtension);
-			summaryEntry = this.sessionManager.getEntry(summaryId) as BranchSummaryEntry;
-
-			// Attach label to the summary entry
-			if (label) {
-				this.sessionManager.appendLabelChange(summaryId, label);
-			}
-		} else if (newLeafId === null) {
-			// No summary, navigating to root - reset leaf
-			this.sessionManager.resetLeaf();
-		} else {
-			// No summary, navigating to non-root
-			this.sessionManager.branch(newLeafId);
-		}
-
-		// Attach label to target entry when not summarizing (no summary entry to label)
-		if (label && !summaryText) {
-			this.sessionManager.appendLabelChange(targetId, label);
-		}
-
-		// Update agent state
-		const sessionContext = this.sessionManager.buildSessionContext();
-		this.agent.state.messages = sessionContext.messages;
-
-		// Emit session_tree event
-		await this._extensionRunner.emit({
-			type: "session_tree",
-			newLeafId: this.sessionManager.getLeafId(),
-			oldLeafId,
-			summaryEntry,
-			fromExtension: summaryText ? fromExtension : undefined,
-		});
-
-		// Emit to custom tools
-
-		this._branchSummaryAbortController = undefined;
-		return { editorText, cancelled: false, summaryEntry };
 	}
 
 	/**

@@ -13,7 +13,6 @@ See these complete provider examples:
 
 - [`examples/extensions/custom-provider-anthropic/`](../examples/extensions/custom-provider-anthropic/)
 - [`examples/extensions/custom-provider-gitlab-duo/`](../examples/extensions/custom-provider-gitlab-duo/)
-- [`examples/extensions/custom-provider-qwen-cli/`](../examples/extensions/custom-provider-qwen-cli/)
 
 ## Table of Contents
 
@@ -41,6 +40,7 @@ export default function (pi: ExtensionAPI) {
 
   // Register new provider with models
   pi.registerProvider("my-provider", {
+    name: "My Provider",
     baseUrl: "https://api.example.com",
     apiKey: "MY_API_KEY",
     api: "openai-completions",
@@ -198,7 +198,6 @@ The `api` field determines which streaming implementation is used:
 | `openai-codex-responses` | OpenAI Codex Responses API |
 | `mistral-conversations` | Mistral SDK Conversations/Chat streaming |
 | `google-generative-ai` | Google Generative AI API |
-| `google-gemini-cli` | Google Cloud Code Assist API |
 | `google-vertex` | Google Vertex AI API |
 | `bedrock-converse-stream` | Amazon Bedrock Converse API |
 
@@ -544,6 +543,9 @@ Run tests with your provider/model pairs to verify compatibility.
 
 ```typescript
 interface ProviderConfig {
+  /** Display name for the provider in UI such as /login. */
+  name?: string;
+
   /** API endpoint URL. Required when defining models. */
   baseUrl?: string;
 

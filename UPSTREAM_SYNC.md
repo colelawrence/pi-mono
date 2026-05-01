@@ -381,3 +381,25 @@ If a sync exposed a recurring conflict pattern, confusing decision point, or bet
   - repeated friction: Vite / tsgo verification in a temporary worktree still depends on local built workspace entrypoints (`packages/tui`, `packages/ai`, `packages/web-ui`) before coding-agent tests or root `npm run check` can run cleanly
   - next carry to reduce: move epi runtime symbol exposure and lifecycle fencing farther out of `agent-session.ts` / `runner.ts`, and reassess whether coding-agent still needs the legacy `@sinclair/typebox` runtime dependency once loader/tests no longer require it
   - process update: the default fetch command in this file was wrong (`git fetch upstream origin --tags`); keep the per-remote fetch form, and expect fresh temporary worktrees to need both `npm install` and a few dependent workspace builds before verification is trustworthy
+
+## Sync 2026-05-01
+- merged: `upstream/main @ def47ece`
+- branch: `sync/upstream-2026-05-01`
+- conflicts:
+  - `packages/tui/src/tui.ts` — kept upstream `normalizeTerminalOutput` import and reapplied downstream `truncateToWidth` import for non-fatal overflow/render-error recovery
+  - `packages/coding-agent/package.json`, `package-lock.json` — updated to upstream `0.71.1` workspace deps while preserving downstream-required `@opentelemetry/api` and coding-agent `@sinclair/typebox`; dropped stale Slack lockfile entries after upstream removed `packages/mom`
+- verification:
+  - [x] `cd packages/tui && node --test --import tsx test/tui-render.test.ts`
+  - [x] `cd packages/agent && npm run build`
+  - [x] `cd packages/coding-agent && npx tsx ../../node_modules/vitest/dist/cli.js --run test/host-capabilities.test.ts test/trigger-compact-extension.test.ts test/user-turn-ready.test.ts test/agent-session-runtime-invariants.test.ts test/suite/agent-session-runtime.test.ts`
+  - [x] `./install-epi.sh`
+  - [x] `npm run check`
+- notes:
+  - current carry patches still expected: `packages/tui/src/tui.ts` for loud-but-non-fatal render failures/overwide lines, `packages/coding-agent/src/core/agent-session.ts` / `agent-session-runtime.ts` / `extensions/runner.ts` / `user-turn-ready.ts` for epi runtime + lifecycle fence + turn-ready integration, `packages/coding-agent/src/core/extensions/loader.ts` / `host-capabilities.ts` for downstream host-capability + layered-extension support, `packages/coding-agent/src/modes/interactive/interactive-mode.ts` for hidden custom-message visibility, and `packages/agent/src/proxy.ts` for structural proxy typing
+  - `packages/ai/src/models.generated.ts` changed as part of the upstream merge state; live regeneration during `./install-epi.sh` did not leave additional dirty churn beyond the staged merge result
+  - the primary checkout had pre-existing local dirt only in generated `packages/ai/src/models.generated.ts`; it was backed up to `/tmp/pi-mono-effect-sync/` and reset to `HEAD` before syncing so the primary checkout could be updated directly
+- reflection:
+  - surprisingly easy: upstream `0.71.1` auto-merged through the core coding-agent carry files; only package metadata and the TUI import seam conflicted
+  - repeated friction: generated-model dirt remains the common primary-checkout hygiene issue even when the sync itself does not require hand-merging generated output
+  - next carry to reduce: keep shrinking the TUI render-error carry to a narrow helper/seam if upstream continues changing render normalization, and revisit whether coding-agent still needs legacy `@sinclair/typebox`
+  - process update: when the only primary dirt is generated models, backing it up and restoring the exact `HEAD` blob lets the documented primary-checkout sync path proceed without a temporary worktree

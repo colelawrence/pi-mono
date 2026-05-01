@@ -11,7 +11,6 @@ export type KnownApi =
 	| "anthropic-messages"
 	| "bedrock-converse-stream"
 	| "google-generative-ai"
-	| "google-gemini-cli"
 	| "google-vertex";
 
 export type Api = KnownApi | (string & {});
@@ -20,8 +19,6 @@ export type KnownProvider =
 	| "amazon-bedrock"
 	| "anthropic"
 	| "google"
-	| "google-gemini-cli"
-	| "google-antigravity"
 	| "google-vertex"
 	| "openai"
 	| "azure-openai-responses"
@@ -37,11 +34,15 @@ export type KnownProvider =
 	| "mistral"
 	| "minimax"
 	| "minimax-cn"
+	| "moonshotai"
+	| "moonshotai-cn"
 	| "huggingface"
 	| "fireworks"
 	| "opencode"
 	| "opencode-go"
-	| "kimi-coding";
+	| "kimi-coding"
+	| "cloudflare-workers-ai"
+	| "cloudflare-ai-gateway";
 export type Provider = KnownProvider | string;
 
 export type ThinkingLevel = "minimal" | "low" | "medium" | "high" | "xhigh";
@@ -57,7 +58,7 @@ export interface ThinkingBudgets {
 // Base options all providers share
 export type CacheRetention = "none" | "short" | "long";
 
-export type Transport = "sse" | "websocket" | "auto";
+export type Transport = "sse" | "websocket" | "websocket-cached" | "auto";
 
 export interface ProviderResponse {
 	status: number;
@@ -215,6 +216,7 @@ export interface AssistantMessage {
 	api: Api;
 	provider: Provider;
 	model: string;
+	responseModel?: string; // Concrete `chunk.model` when different from the requested `model` (e.g. OpenRouter `auto` -> `anthropic/...`)
 	responseId?: string; // Provider-specific response/message identifier when the upstream API exposes one
 	usage: Usage;
 	stopReason: StopReason;
