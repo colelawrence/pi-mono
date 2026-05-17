@@ -332,6 +332,7 @@ export class AgentSession {
 				const lastAssistant = this._findLastAssistantInMessages(event.messages);
 				return !!lastAssistant && this._isRetryableError(lastAssistant);
 			},
+			afterScheduledContinuation: () => this._flushPendingEpiUserTurnReady(),
 		});
 
 		// Always subscribe to agent events for internal handling
@@ -457,6 +458,7 @@ export class AgentSession {
 
 	// Track last assistant message for auto-compaction check
 	private _lastAssistantMessage: AssistantMessage | undefined = undefined;
+	private _pendingEpiUserTurnReadyHadCompaction: boolean | undefined = undefined;
 
 	private _findLastAssistantInMessages(messages: AgentMessage[]): AssistantMessage | undefined {
 		for (let i = messages.length - 1; i >= 0; i--) {
@@ -558,11 +560,18 @@ export class AgentSession {
 
 			const latestCompactionAfter = getLatestCompactionEntry(this.sessionManager.getBranch())?.timestamp;
 			this._runtime.resolveRetry();
-			await this._emitEpiUserTurnReady({ hadCompaction: latestCompactionBefore !== latestCompactionAfter });
+			this._requestEpiUserTurnReady({ hadCompaction: latestCompactionBefore !== latestCompactionAfter });
 		}
 	}
 
-	private async _emitEpiUserTurnReady(input: { hadCompaction: boolean }): Promise<void> {
+	private _requestEpiUserTurnReady(input: { hadCompaction: boolean }): void {
+		this._pendingEpiUserTurnReadyHadCompaction =
+			(this._pendingEpiUserTurnReadyHadCompaction ?? false) || input.hadCompaction;
+	}
+
+	private async _flushPendingEpiUserTurnReady(): Promise<void> {
+		const hadCompaction = this._pendingEpiUserTurnReadyHadCompaction;
+		if (hadCompaction === undefined) return;
 		if (!this._extensionRunner) return;
 		if (
 			!shouldEmitEpiUserTurnReady({
@@ -570,6 +579,7 @@ export class AgentSession {
 				hasQueuedMessages: this.agent.hasQueuedMessages(),
 				isCompacting: this.isCompacting,
 				isRetrying: this.isRetrying,
+				hasActiveTurnWork: this._runtime.hasActiveTurnWork(),
 			})
 		) {
 			return;
@@ -577,8 +587,9 @@ export class AgentSession {
 
 		await this._extensionRunner.emit({
 			type: "epi_user_turn_ready",
-			hadCompaction: input.hadCompaction,
+			hadCompaction,
 		});
+		this._pendingEpiUserTurnReadyHadCompaction = undefined;
 	}
 
 	/** Extract text content from a message */
@@ -1104,6 +1115,7 @@ export class AgentSession {
 			);
 		};
 		await this._runtime.runPromptCycle(this.agent, messages, isAbortedOrError);
+		await this._flushPendingEpiUserTurnReady();
 	}
 
 	/**
@@ -1289,7 +1301,7 @@ export class AgentSession {
 				this.agent.steer(appMessage);
 			}
 		} else if (options?.triggerTurn) {
-			if (this._runtime.isInPromptDrainLoop()) {
+			if (this._runtime.hasActiveTurnWork() || this._runtime.isRetrying()) {
 				// Inside the prompt drain loop — queue as follow-up.
 				// The drain loop will pick it up via agent.continue().
 				this.agent.followUp(appMessage);
@@ -1354,6 +1366,7 @@ export class AgentSession {
 					);
 				};
 				await this._runtime.runPromptCycle(this.agent, messages, isAbortedOrError);
+				await this._flushPendingEpiUserTurnReady();
 			}
 		} else {
 			this.agent.state.messages.push(appMessage);
@@ -1397,6 +1410,15 @@ export class AgentSession {
 			}
 			text = textParts.join("\n");
 			if (images.length === 0) images = undefined;
+		}
+
+		if (this.isStreaming || this._runtime.hasActiveTurnWork() || this._runtime.isRetrying()) {
+			if (options?.deliverAs === "steer") {
+				await this._queueSteer(text, images);
+			} else {
+				await this._queueFollowUp(text, images);
+			}
+			return;
 		}
 
 		// Use prompt() with expandPromptTemplates: false to skip command handling and template expansion
@@ -2191,6 +2213,17 @@ export class AgentSession {
 		return `extension:${name}`;
 	}
 
+	private _formatRuntimeActionError(error: unknown): string {
+		const message = error instanceof Error ? error.message : String(error);
+		return (
+			`${message} ` +
+			`[runtime_state: phase=${this._runtime.getPhase()}, runtimeHasActiveTurnWork=${this._runtime.hasActiveTurnWork()}, ` +
+			`isStreaming=${this.isStreaming}, agentHasQueuedMessages=${this.agent.hasQueuedMessages()}, ` +
+			`pendingMessageCount=${this.pendingMessageCount}, ` +
+			`isRetrying=${this.isRetrying}, isCompacting=${this.isCompacting}]`
+		);
+	}
+
 	private _applyExtensionBindings(runner: ExtensionRunner): void {
 		runner.setUIContext(this._extensionUIContext);
 		runner.bindCommandContext(this._extensionCommandContextActions);
@@ -2248,7 +2281,8 @@ export class AgentSession {
 						runner.emitError({
 							extensionPath: "<runtime>",
 							event: "send_message",
-							error: err instanceof Error ? err.message : String(err),
+							error: this._formatRuntimeActionError(err),
+							...(err instanceof Error && err.stack ? { stack: err.stack } : {}),
 						});
 					});
 				},
@@ -2257,7 +2291,8 @@ export class AgentSession {
 						runner.emitError({
 							extensionPath: "<runtime>",
 							event: "send_user_message",
-							error: err instanceof Error ? err.message : String(err),
+							error: this._formatRuntimeActionError(err),
+							...(err instanceof Error && err.stack ? { stack: err.stack } : {}),
 						});
 					});
 				},

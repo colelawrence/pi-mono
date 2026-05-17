@@ -3,8 +3,15 @@ export interface UserTurnReadyCheckInput {
 	hasQueuedMessages: boolean;
 	isCompacting: boolean;
 	isRetrying: boolean;
+	hasActiveTurnWork?: boolean;
 }
 
 export function shouldEmitEpiUserTurnReady(input: UserTurnReadyCheckInput): boolean {
-	return !input.isStreaming && !input.hasQueuedMessages && !input.isCompacting && !input.isRetrying;
+	return (
+		!input.isStreaming &&
+		!input.hasQueuedMessages &&
+		!input.isCompacting &&
+		!input.isRetrying &&
+		!input.hasActiveTurnWork
+	);
 }

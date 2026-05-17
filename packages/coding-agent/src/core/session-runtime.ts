@@ -124,6 +124,12 @@ export interface SessionRuntime {
 	readonly isInPromptDrainLoop: () => boolean;
 
 	/**
+	 * Whether the runtime has accepted or is actively running turn work.
+	 * This is the authoritative fresh-prompt admission guard.
+	 */
+	readonly hasActiveTurnWork: () => boolean;
+
+	/**
 	 * Get current retry attempt count (synchronous).
 	 */
 	readonly getRetryAttempt: () => number;
@@ -196,6 +202,8 @@ export interface SessionRuntimeDeps {
 	processEvent: (event: AgentEvent) => Promise<void>;
 	/** Called synchronously to check if agent_end has retryable error */
 	isRetryableAgentEnd: (event: AgentEvent) => boolean;
+	/** Called after a scheduled continuation and its accepted events have drained. */
+	afterScheduledContinuation?: () => Promise<void>;
 }
 
 export function createSessionRuntime(deps: SessionRuntimeDeps): SessionRuntime {
@@ -214,6 +222,9 @@ export function createSessionRuntime(deps: SessionRuntimeDeps): SessionRuntime {
 	let continuationTimer: ReturnType<typeof setTimeout> | null = null;
 	let continuationGeneration = 0;
 	let lifecycleFenceDepth = 0;
+	let turnQueue: Promise<void> = Promise.resolve();
+	let pendingTurnWork = 0;
+	let activeTurnWork = 0;
 
 	// --- Event subscription ---
 	function subscribeToAgent(agent: Agent): () => void {
@@ -250,6 +261,7 @@ export function createSessionRuntime(deps: SessionRuntimeDeps): SessionRuntime {
 		cancelContinuation();
 		abortRetry();
 		try {
+			await turnQueue.catch(() => {});
 			await drainEventQueue();
 		} finally {
 			lifecycleFenceDepth--;
@@ -261,26 +273,57 @@ export function createSessionRuntime(deps: SessionRuntimeDeps): SessionRuntime {
 	}
 
 	// --- Prompt cycle ---
+	async function withTurnWork<T>(work: () => Promise<T>): Promise<T> {
+		pendingTurnWork++;
+		const previous = turnQueue.catch(() => {});
+		let release!: () => void;
+		turnQueue = new Promise<void>((resolve) => {
+			release = resolve;
+		});
+
+		await previous;
+		pendingTurnWork--;
+		if (lifecycleFenceDepth > 0) {
+			release();
+			throw new Error("Turn work cancelled by lifecycle fence");
+		}
+		activeTurnWork++;
+		try {
+			return await work();
+		} finally {
+			activeTurnWork--;
+			release();
+		}
+	}
+
+	async function drainQueuedMessages(
+		agent: Agent,
+		isAbortedOrError: (msg: AgentMessage | undefined) => boolean,
+	): Promise<void> {
+		let drainCount = 0;
+		while (agent.hasQueuedMessages() && drainCount++ < 50) {
+			const lastMsg = agent.state.messages[agent.state.messages.length - 1];
+			if (isAbortedOrError(lastMsg)) break;
+			await agent.continue();
+			await eventQueue;
+		}
+	}
+
 	async function runPromptCycle(
 		agent: Agent,
 		messages: AgentMessage[],
 		isAbortedOrError: (msg: AgentMessage | undefined) => boolean,
 	): Promise<void> {
-		phase = "PromptDrainLoop";
-		try {
-			await agent.prompt(messages);
-			await eventQueue;
-
-			let drainCount = 0;
-			while (agent.hasQueuedMessages() && drainCount++ < 50) {
-				const lastMsg = agent.state.messages[agent.state.messages.length - 1];
-				if (isAbortedOrError(lastMsg)) break;
-				await agent.continue();
+		await withTurnWork(async () => {
+			phase = "PromptDrainLoop";
+			try {
+				await agent.prompt(messages);
 				await eventQueue;
+				await drainQueuedMessages(agent, isAbortedOrError);
+			} finally {
+				phase = "Idle";
 			}
-		} finally {
-			phase = "Idle";
-		}
+		});
 		await waitForRetry();
 	}
 
@@ -289,21 +332,16 @@ export function createSessionRuntime(deps: SessionRuntimeDeps): SessionRuntime {
 		message: AgentMessage,
 		isAbortedOrError: (msg: AgentMessage | undefined) => boolean,
 	): Promise<void> {
-		phase = "PromptDrainLoop";
-		try {
-			await agent.prompt(message);
-			await eventQueue;
-
-			let drainCount = 0;
-			while (agent.hasQueuedMessages() && drainCount++ < 50) {
-				const lastMsg = agent.state.messages[agent.state.messages.length - 1];
-				if (isAbortedOrError(lastMsg)) break;
-				await agent.continue();
+		await withTurnWork(async () => {
+			phase = "PromptDrainLoop";
+			try {
+				await agent.prompt(message);
 				await eventQueue;
+				await drainQueuedMessages(agent, isAbortedOrError);
+			} finally {
+				phase = "Idle";
 			}
-		} finally {
-			phase = "Idle";
-		}
+		});
 		await waitForRetry();
 	}
 
@@ -314,6 +352,10 @@ export function createSessionRuntime(deps: SessionRuntimeDeps): SessionRuntime {
 
 	function isInPromptDrainLoop(): boolean {
 		return phase === "PromptDrainLoop";
+	}
+
+	function hasActiveTurnWork(): boolean {
+		return activeTurnWork > 0 || pendingTurnWork > 0;
 	}
 
 	// --- Retry ---
@@ -371,6 +413,19 @@ export function createSessionRuntime(deps: SessionRuntimeDeps): SessionRuntime {
 	}
 
 	// --- Continuation scheduling ---
+	async function runScheduledContinuation(agent: Agent): Promise<void> {
+		await withTurnWork(async () => {
+			phase = "PromptDrainLoop";
+			try {
+				await agent.continue();
+				await eventQueue;
+			} finally {
+				phase = "Idle";
+			}
+		});
+		await deps.afterScheduledContinuation?.();
+	}
+
 	function scheduleContinuation(agent: Agent, delayMs: number): void {
 		if (lifecycleFenceDepth > 0) {
 			return;
@@ -382,7 +437,7 @@ export function createSessionRuntime(deps: SessionRuntimeDeps): SessionRuntime {
 			if (generation !== continuationGeneration) {
 				return;
 			}
-			agent.continue().catch(() => {});
+			void runScheduledContinuation(agent).catch(() => {});
 		}, delayMs);
 	}
 
@@ -414,6 +469,7 @@ export function createSessionRuntime(deps: SessionRuntimeDeps): SessionRuntime {
 		isLifecycleFenceActive,
 		getPhase,
 		isInPromptDrainLoop,
+		hasActiveTurnWork,
 		getRetryAttempt,
 		isRetrying,
 		waitForRetry,

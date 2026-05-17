@@ -67,6 +67,13 @@ type SessionWithCompactionInternals = {
 	_runAutoCompaction: (reason: "overflow" | "threshold", willRetry: boolean) => Promise<void>;
 };
 
+type SessionWithReadinessInternals = {
+	_runtime: {
+		hasActiveTurnWork: () => boolean;
+		isRetrying: () => boolean;
+	};
+};
+
 describe("AgentSession runtime invariants", () => {
 	let session: AgentSession;
 	let tempDir: string;
@@ -226,6 +233,46 @@ describe("AgentSession runtime invariants", () => {
 		runtime.dispose();
 	});
 
+	it("fenceForLifecycleSeam waits for active turn work and rejects pending turn work", async () => {
+		const runtime = createSessionRuntime({
+			processEvent: async () => {},
+			isRetryableAgentEnd: () => false,
+		});
+		const firstPromptEntered = createDeferred<void>();
+		const releaseFirstPrompt = createDeferred<void>();
+		let promptCalls = 0;
+		const fakeAgent = {
+			state: { messages: [] },
+			hasQueuedMessages: () => false,
+			prompt: async () => {
+				promptCalls++;
+				if (promptCalls === 1) {
+					firstPromptEntered.resolve();
+					await releaseFirstPrompt.promise;
+				}
+			},
+		} as unknown as Agent;
+
+		const firstTurn = runtime.runPromptCycle(fakeAgent, [], () => false);
+		await firstPromptEntered.promise;
+		const secondTurn = runtime.runPromptCycle(fakeAgent, [], () => false).catch((error: Error) => error);
+		const fence = runtime.fenceForLifecycleSeam();
+
+		expect(runtime.hasActiveTurnWork()).toBe(true);
+		releaseFirstPrompt.resolve();
+		await firstTurn;
+		await fence;
+		const secondTurnError = await secondTurn;
+
+		if (!(secondTurnError instanceof Error)) {
+			throw new Error("expected pending turn to be rejected by lifecycle fence");
+		}
+		expect(secondTurnError.message).toBe("Turn work cancelled by lifecycle fence");
+		expect(promptCalls).toBe(1);
+		expect(runtime.hasActiveTurnWork()).toBe(false);
+		runtime.dispose();
+	});
+
 	/**
 	 * INVARIANT: a lifecycle seam fence cancels auto-compaction continuations that
 	 * were armed by the old owner before the seam.
@@ -299,6 +346,81 @@ describe("AgentSession runtime invariants", () => {
 		await Promise.resolve();
 
 		expect(continueSpy).not.toHaveBeenCalled();
+	});
+
+	it("epi_user_turn_ready grants a safe seam for starting the next turn", async () => {
+		let callCount = 0;
+		let readyCount = 0;
+		const errors: string[] = [];
+		const readySnapshots: Array<{ isStreaming: boolean; hasActiveTurnWork: boolean; isRetrying: boolean }> = [];
+		const secondTurnDone = createDeferred<void>();
+		const model = getModel("anthropic", "claude-sonnet-4-5")!;
+
+		const agent = new Agent({
+			getApiKey: () => "test-key",
+			initialState: { model, systemPrompt: "Test", tools: [] },
+			streamFn: () => {
+				callCount++;
+				const currentCall = callCount;
+				const stream = new MockAssistantStream();
+				queueMicrotask(() => {
+					const msg = createAssistantMessage(`Response ${currentCall}`);
+					stream.push({ type: "start", partial: msg });
+					stream.push({ type: "done", reason: "stop", message: msg });
+					if (currentCall === 2) secondTurnDone.resolve();
+				});
+				return stream;
+			},
+		});
+
+		const sessionManager = SessionManager.inMemory();
+		const settingsManager = SettingsManager.create(tempDir, tempDir);
+		const authStorage = AuthStorage.create(join(tempDir, "auth.json"));
+		const modelRegistry = ModelRegistry.create(authStorage, tempDir);
+		authStorage.setRuntimeApiKey("anthropic", "test-key");
+		const extensionsResult = await createTestExtensionsResult(
+			[
+				(pi) => {
+					pi.on("epi_user_turn_ready", () => {
+						const sessionInternals = session as unknown as SessionWithReadinessInternals;
+						readySnapshots.push({
+							isStreaming: session.isStreaming,
+							hasActiveTurnWork: sessionInternals._runtime.hasActiveTurnWork(),
+							isRetrying: sessionInternals._runtime.isRetrying(),
+						});
+						readyCount++;
+						if (readyCount === 1) {
+							pi.sendUserMessage("from ready seam");
+						}
+					});
+				},
+			],
+			tempDir,
+		);
+
+		session = new AgentSession({
+			agent,
+			sessionManager,
+			settingsManager,
+			cwd: tempDir,
+			modelRegistry,
+			resourceLoader: createTestResourceLoader({ extensionsResult }),
+		});
+		await session.bindExtensions({
+			shutdownHandler: () => {},
+			onError: (error) => errors.push(error.error),
+		});
+
+		await session.prompt("initial");
+		await Promise.race([
+			secondTurnDone.promise,
+			new Promise((_, reject) => setTimeout(() => reject(new Error("second turn did not complete")), 100)),
+		]);
+
+		expect(errors).toEqual([]);
+		expect(callCount).toBe(2);
+		expect(readyCount).toBeGreaterThanOrEqual(1);
+		expect(readySnapshots[0]).toEqual({ isStreaming: false, hasActiveTurnWork: false, isRetrying: false });
 	});
 
 	it("sendCustomMessage queues as followUp during prompt drain loop", async () => {
