@@ -2,6 +2,7 @@
 
 // Autocomplete support
 export {
+	type AtPathMention,
 	type AutocompleteItem,
 	type AutocompleteProvider,
 	type AutocompleteSuggestions,

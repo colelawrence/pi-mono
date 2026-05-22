@@ -503,6 +503,11 @@ export class InteractiveMode {
 			[...slashCommands, ...templateCommands, ...extensionCommands, ...skillCommandList],
 			this.sessionManager.getCwd(),
 			this.fdPath,
+			this.session.resourceLoader.getSkills().skills.map((skill) => ({
+				name: skill.name,
+				path: skill.filePath,
+				description: "Skill",
+			})),
 		);
 	}
 

@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Added
+
+- Added interactive `@` autocomplete for loaded skills, resolving selected skills to `~`-relative `SKILL.md` file references.
+
 ## [0.71.1] - 2026-05-01
 
 ### Added

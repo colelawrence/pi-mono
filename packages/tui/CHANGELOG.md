@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Added
+
+- Added optional `@` path mention aliases to `CombinedAutocompleteProvider`, allowing consumers to complete named resources to file paths.
+
 ## [0.71.1] - 2026-05-01
 
 ## [0.71.0] - 2026-04-30

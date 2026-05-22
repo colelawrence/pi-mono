@@ -1,7 +1,7 @@
 import assert from "node:assert";
 import { spawnSync } from "node:child_process";
 import { mkdirSync, mkdtempSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
-import { tmpdir } from "node:os";
+import { homedir, tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { afterEach, beforeEach, describe, it, test } from "node:test";
 import { CombinedAutocompleteProvider } from "../src/autocomplete.js";
@@ -111,6 +111,41 @@ describe("CombinedAutocompleteProvider", () => {
 			if (result) {
 				assert.strictEqual(result.prefix, "/", "Prefix should be '/'");
 			}
+		});
+	});
+
+	describe("@ path mentions", () => {
+		test("resolves mention aliases to home-relative @ paths", async () => {
+			const provider = new CombinedAutocompleteProvider([], "/tmp", null, [
+				{
+					name: "using-effect",
+					path: join(homedir(), ".pi/agent/skills/using-effect/SKILL.md"),
+					description: "Skill",
+				},
+			]);
+			const line = "@using-effect";
+			const result = await getSuggestions(provider, [line], 0, line.length);
+
+			assert.notEqual(result, null, "Should return suggestions for a loaded skill mention");
+			const item = result?.items.find((entry) => entry.label === "using-effect");
+			assert.strictEqual(item?.value, "@~/.pi/agent/skills/using-effect/SKILL.md");
+			assert.strictEqual(item?.description, "Skill — ~/.pi/agent/skills/using-effect/SKILL.md");
+		});
+
+		test("applies mention aliases as @ file references", async () => {
+			const provider = new CombinedAutocompleteProvider([], "/tmp", null, [
+				{
+					name: "using-effect",
+					path: join(homedir(), ".pi/agent/skills/using-effect/SKILL.md"),
+				},
+			]);
+			const line = "read @using";
+			const result = await getSuggestions(provider, [line], 0, line.length);
+			const item = result?.items.find((entry) => entry.label === "using-effect");
+
+			assert.ok(item, "Should find using-effect mention");
+			const applied = provider.applyCompletion([line], 0, line.length, item, result!.prefix);
+			assert.strictEqual(applied.lines[0], "read @~/.pi/agent/skills/using-effect/SKILL.md ");
 		});
 	});
 

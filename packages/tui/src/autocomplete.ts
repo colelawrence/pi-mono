@@ -10,6 +10,21 @@ function toDisplayPath(value: string): string {
 	return value.replace(/\\/g, "/");
 }
 
+function toHomeRelativeDisplayPath(value: string): string {
+	const displayPath = toDisplayPath(value);
+	const homePath = toDisplayPath(homedir()).replace(/\/+$/g, "");
+
+	if (displayPath === homePath) {
+		return "~";
+	}
+
+	if (displayPath.startsWith(`${homePath}/`)) {
+		return `~/${displayPath.slice(homePath.length + 1)}`;
+	}
+
+	return displayPath;
+}
+
 function escapeRegex(value: string): string {
 	return value.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
 }
@@ -222,6 +237,12 @@ export interface AutocompleteItem {
 	description?: string;
 }
 
+export interface AtPathMention {
+	name: string;
+	path: string;
+	description?: string;
+}
+
 type Awaitable<T> = T | Promise<T>;
 
 export interface SlashCommand {
@@ -271,11 +292,18 @@ export class CombinedAutocompleteProvider implements AutocompleteProvider {
 	private commands: (SlashCommand | AutocompleteItem)[];
 	private basePath: string;
 	private fdPath: string | null;
+	private atPathMentions: AtPathMention[];
 
-	constructor(commands: (SlashCommand | AutocompleteItem)[] = [], basePath: string, fdPath: string | null = null) {
+	constructor(
+		commands: (SlashCommand | AutocompleteItem)[] = [],
+		basePath: string,
+		fdPath: string | null = null,
+		atPathMentions: AtPathMention[] = [],
+	) {
 		this.commands = commands;
 		this.basePath = basePath;
 		this.fdPath = fdPath;
+		this.atPathMentions = atPathMentions;
 	}
 
 	async getSuggestions(
@@ -290,10 +318,14 @@ export class CombinedAutocompleteProvider implements AutocompleteProvider {
 		const atPrefix = this.extractAtPrefix(textBeforeCursor);
 		if (atPrefix) {
 			const { rawPrefix, isQuotedPrefix } = parsePathPrefix(atPrefix);
-			const suggestions = await this.getFuzzyFileSuggestions(rawPrefix, {
-				isQuotedPrefix,
-				signal: options.signal,
-			});
+			const [pathSuggestions, mentionSuggestions] = await Promise.all([
+				this.getFuzzyFileSuggestions(rawPrefix, {
+					isQuotedPrefix,
+					signal: options.signal,
+				}),
+				this.getAtPathMentionSuggestions(rawPrefix, isQuotedPrefix),
+			]);
+			const suggestions = [...mentionSuggestions, ...pathSuggestions];
 			if (suggestions.length === 0) return null;
 
 			return {
@@ -687,6 +719,25 @@ export class CombinedAutocompleteProvider implements AutocompleteProvider {
 			// Directory doesn't exist or not accessible
 			return [];
 		}
+	}
+
+	private getAtPathMentionSuggestions(query: string, isQuotedPrefix: boolean): AutocompleteItem[] {
+		if (!query || query.includes("/")) {
+			return [];
+		}
+
+		return fuzzyFilter(this.atPathMentions, query, (mention) => mention.name).map((mention) => {
+			const displayPath = toHomeRelativeDisplayPath(mention.path);
+			return {
+				value: buildCompletionValue(displayPath, {
+					isDirectory: false,
+					isAtPrefix: true,
+					isQuotedPrefix,
+				}),
+				label: mention.name,
+				description: mention.description ? `${mention.description} — ${displayPath}` : displayPath,
+			};
+		});
 	}
 
 	// Score an entry against the query (higher = better match)
