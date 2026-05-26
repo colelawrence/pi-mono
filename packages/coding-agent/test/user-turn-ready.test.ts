@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { shouldEmitEpiUserTurnReady } from "../src/core/user-turn-ready.js";
+import { shouldEmitEpiUserTurnReady } from "../src/core/user-turn-ready.ts";
 
 describe("shouldEmitEpiUserTurnReady", () => {
 	it("returns true only when the host is fully idle after post-turn work", () => {

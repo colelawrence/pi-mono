@@ -4,8 +4,8 @@ import {
 	GoogleGenAI,
 	type ThinkingConfig,
 } from "@google/genai";
-import { getEnvApiKey } from "../env-api-keys.js";
-import { calculateCost } from "../models.js";
+import { getEnvApiKey } from "../env-api-keys.ts";
+import { calculateCost, clampThinkingLevel } from "../models.ts";
 import type {
 	Api,
 	AssistantMessage,
@@ -19,10 +19,10 @@ import type {
 	ThinkingContent,
 	ThinkingLevel,
 	ToolCall,
-} from "../types.js";
-import { AssistantMessageEventStream } from "../utils/event-stream.js";
-import { sanitizeSurrogates } from "../utils/sanitize-unicode.js";
-import type { GoogleThinkingLevel } from "./google-shared.js";
+} from "../types.ts";
+import { AssistantMessageEventStream } from "../utils/event-stream.ts";
+import { sanitizeSurrogates } from "../utils/sanitize-unicode.ts";
+import type { GoogleThinkingLevel } from "./google-shared.ts";
 import {
 	convertMessages,
 	convertTools,
@@ -30,8 +30,8 @@ import {
 	mapStopReason,
 	mapToolChoice,
 	retainThoughtSignature,
-} from "./google-shared.js";
-import { buildBaseOptions, clampReasoning } from "./simple-options.js";
+} from "./google-shared.ts";
+import { buildBaseOptions } from "./simple-options.ts";
 
 export interface GoogleOptions extends StreamOptions {
 	toolChoice?: "auto" | "none" | "any";
@@ -290,7 +290,8 @@ export const streamSimpleGoogle: StreamFunction<"google-generative-ai", SimpleSt
 		return streamGoogle(model, context, { ...base, thinking: { enabled: false } } satisfies GoogleOptions);
 	}
 
-	const effort = clampReasoning(options.reasoning)!;
+	const clampedReasoning = clampThinkingLevel(model, options.reasoning);
+	const effort = (clampedReasoning === "off" ? "high" : clampedReasoning) as ClampedThinkingLevel;
 	const googleModel = model as Model<"google-generative-ai">;
 
 	if (isGemini3ProModel(googleModel) || isGemini3FlashModel(googleModel) || isGemma4Model(googleModel)) {

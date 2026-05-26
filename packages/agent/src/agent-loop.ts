@@ -10,7 +10,7 @@ import {
 	streamSimple,
 	type ToolResultMessage,
 	validateToolArguments,
-} from "@mariozechner/pi-ai";
+} from "@earendil-works/pi-ai";
 import type {
 	AgentContext,
 	AgentEvent,
@@ -20,7 +20,7 @@ import type {
 	AgentToolCall,
 	AgentToolResult,
 	StreamFn,
-} from "./types.js";
+} from "./types.ts";
 
 export type AgentEventSink = (event: AgentEvent) => Promise<void> | void;
 
@@ -153,13 +153,15 @@ function createAgentStream(): EventStream<AgentEvent, AgentMessage[]> {
  * Main loop logic shared by agentLoop and agentLoopContinue.
  */
 async function runLoop(
-	currentContext: AgentContext,
+	initialContext: AgentContext,
 	newMessages: AgentMessage[],
-	config: AgentLoopConfig,
+	initialConfig: AgentLoopConfig,
 	signal: AbortSignal | undefined,
 	emit: AgentEventSink,
 	streamFn?: StreamFn,
 ): Promise<void> {
+	let currentContext = initialContext;
+	let config = initialConfig;
 	let firstTurn = true;
 	// Check for steering messages at start (user may have typed while waiting)
 	let pendingMessages: AgentMessage[] = (await config.getSteeringMessages?.()) || [];
@@ -214,6 +216,39 @@ async function runLoop(
 			}
 
 			await emit({ type: "turn_end", message, toolResults });
+
+			const nextTurnContext = {
+				message,
+				toolResults,
+				context: currentContext,
+				newMessages,
+			};
+			const nextTurnSnapshot = await config.prepareNextTurn?.(nextTurnContext);
+			if (nextTurnSnapshot) {
+				currentContext = nextTurnSnapshot.context ?? currentContext;
+				config = {
+					...config,
+					model: nextTurnSnapshot.model ?? config.model,
+					reasoning:
+						nextTurnSnapshot.thinkingLevel === undefined
+							? config.reasoning
+							: nextTurnSnapshot.thinkingLevel === "off"
+								? undefined
+								: nextTurnSnapshot.thinkingLevel,
+				};
+			}
+
+			if (
+				await config.shouldStopAfterTurn?.({
+					message,
+					toolResults,
+					context: currentContext,
+					newMessages,
+				})
+			) {
+				await emit({ type: "agent_end", messages: newMessages });
+				return;
+			}
 
 			pendingMessages = (await config.getSteeringMessages?.()) || [];
 		}
@@ -401,6 +436,10 @@ async function executeToolCallsSequential(
 		await emitToolResultMessage(toolResultMessage, emit);
 		finalizedCalls.push(finalized);
 		messages.push(toolResultMessage);
+
+		if (signal?.aborted) {
+			break;
+		}
 	}
 
 	return {
@@ -436,6 +475,9 @@ async function executeToolCallsParallel(
 			} satisfies FinalizedToolCallOutcome;
 			await emitToolExecutionEnd(finalized, emit);
 			finalizedCalls.push(finalized);
+			if (signal?.aborted) {
+				break;
+			}
 			continue;
 		}
 
@@ -452,6 +494,9 @@ async function executeToolCallsParallel(
 			await emitToolExecutionEnd(finalized, emit);
 			return finalized;
 		});
+		if (signal?.aborted) {
+			break;
+		}
 	}
 
 	const orderedFinalizedCalls = await Promise.all(
@@ -549,6 +594,13 @@ async function prepareToolCall(
 				},
 				signal,
 			);
+			if (signal?.aborted) {
+				return {
+					kind: "immediate",
+					result: createErrorToolResult("Operation aborted"),
+					isError: true,
+				};
+			}
 			if (beforeResult?.block) {
 				return {
 					kind: "immediate",
@@ -556,6 +608,13 @@ async function prepareToolCall(
 					isError: true,
 				};
 			}
+		}
+		if (signal?.aborted) {
+			return {
+				kind: "immediate",
+				result: createErrorToolResult("Operation aborted"),
+				isError: true,
+			};
 		}
 		return {
 			kind: "prepared",

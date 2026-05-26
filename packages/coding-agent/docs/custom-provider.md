@@ -23,6 +23,7 @@ See these complete provider examples:
 - [Unregister Provider](#unregister-provider)
 - [OAuth Support](#oauth-support)
 - [Custom Streaming API](#custom-streaming-api)
+- [Context Overflow Errors](#context-overflow-errors)
 - [Testing Your Implementation](#testing-your-implementation)
 - [Config Reference](#config-reference)
 - [Model Definition Reference](#model-definition-reference)
@@ -30,7 +31,7 @@ See these complete provider examples:
 ## Quick Reference
 
 ```typescript
-import type { ExtensionAPI } from "@mariozechner/pi-coding-agent";
+import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 
 export default function (pi: ExtensionAPI) {
   // Override baseUrl for existing provider
@@ -96,7 +97,7 @@ To add a completely new provider, specify `models` along with the required confi
 If the model list comes from a remote endpoint, use an async extension factory:
 
 ```typescript
-import type { ExtensionAPI } from "@mariozechner/pi-coding-agent";
+import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 
 export default async function (pi: ExtensionAPI) {
   const response = await fetch("http://localhost:1234/v1/models");
@@ -201,32 +202,35 @@ The `api` field determines which streaming implementation is used:
 | `google-vertex` | Google Vertex AI API |
 | `bedrock-converse-stream` | Amazon Bedrock Converse API |
 
-Most OpenAI-compatible providers work with `openai-completions`. Use `compat` for quirks:
+Most OpenAI-compatible providers work with `openai-completions`. Use model-level `thinkingLevelMap` for model-specific thinking levels, and `compat` for provider quirks:
 
 ```typescript
 models: [{
   id: "custom-model",
   // ...
+  reasoning: true,
+  thinkingLevelMap: {              // map pi levels to provider values; null hides unsupported levels
+    minimal: null,
+    low: null,
+    medium: null,
+    high: "default",
+    xhigh: "max"
+  },
   compat: {
-    supportsDeveloperRole: false,      // use "system" instead of "developer"
+    supportsDeveloperRole: false,   // use "system" instead of "developer"
     supportsReasoningEffort: true,
-    reasoningEffortMap: {              // map pi-ai levels to provider values
-      minimal: "default",
-      low: "default",
-      medium: "default",
-      high: "default",
-      xhigh: "default"
-    },
-      maxTokensField: "max_tokens",      // instead of "max_completion_tokens"
-      requiresToolResultName: true,      // tool results need name field
-      thinkingFormat: "qwen",           // top-level enable_thinking: true
-      cacheControlFormat: "anthropic"   // Anthropic-style cache_control markers
-    }
-  }]
+    maxTokensField: "max_tokens",   // instead of "max_completion_tokens"
+    requiresToolResultName: true,   // tool results need name field
+    thinkingFormat: "qwen",        // top-level enable_thinking: true
+    cacheControlFormat: "anthropic" // Anthropic-style cache_control markers
+  }
+}]
 ```
 
-Use `qwen-chat-template` instead for local Qwen-compatible servers that read `chat_template_kwargs.enable_thinking`.
+Use `openrouter` for OpenRouter-style `reasoning: { effort }` controls. Use `together` for Together-style `reasoning: { enabled }` controls; with `supportsReasoningEffort`, it also sends `reasoning_effort`. Use `qwen-chat-template` instead for local Qwen-compatible servers that read `chat_template_kwargs.enable_thinking`.
 Use `cacheControlFormat: "anthropic"` for OpenAI-compatible providers that expose Anthropic-style prompt caching via `cache_control` on the system prompt, last tool definition, and last user/assistant text content.
+
+For Anthropic-compatible providers using `api: "anthropic-messages"`, set `compat.forceAdaptiveThinking: true` on models or providers whose upstream model requires adaptive thinking (`thinking.type: "adaptive"` plus `output_config.effort`). Built-in adaptive Claude models set this automatically.
 
 > Migration note: Mistral moved from `openai-completions` to `mistral-conversations`.
 > Use `mistral-conversations` for native Mistral models.
@@ -251,7 +255,7 @@ pi.registerProvider("custom-api", {
 Add OAuth/SSO authentication that integrates with `/login`:
 
 ```typescript
-import type { OAuthCredentials, OAuthLoginCallbacks } from "@mariozechner/pi-ai";
+import type { OAuthCredentials, OAuthLoginCallbacks } from "@earendil-works/pi-ai";
 
 pi.registerProvider("corporate-ai", {
   baseUrl: "https://ai.corp.com/v1",
@@ -261,17 +265,28 @@ pi.registerProvider("corporate-ai", {
     name: "Corporate AI (SSO)",
 
     async login(callbacks: OAuthLoginCallbacks): Promise<OAuthCredentials> {
-      // Option 1: Browser-based OAuth
-      callbacks.onAuth({ url: "https://sso.corp.com/authorize?..." });
-
-      // Option 2: Device code flow
-      callbacks.onDeviceCode({
-        userCode: "ABCD-1234",
-        verificationUri: "https://sso.corp.com/device"
+      const method = await callbacks.onSelect({
+        message: "Select login method:",
+        options: [
+          { id: "browser", label: "Browser OAuth" },
+          { id: "device", label: "Device code" }
+        ]
       });
+      if (!method) throw new Error("Login cancelled");
 
-      // Option 3: Prompt for token/code
-      const code = await callbacks.onPrompt({ message: "Enter SSO code:" });
+      let code: string;
+      if (method === "device") {
+        callbacks.onDeviceCode({
+          userCode: "ABCD-1234",
+          verificationUri: "https://sso.corp.com/device",
+          intervalSeconds: 5,
+          expiresInSeconds: 900
+        });
+        code = await pollDeviceCodeUntilComplete();
+      } else {
+        callbacks.onAuth({ url: "https://sso.corp.com/authorize?..." });
+        code = await callbacks.onPrompt({ message: "Enter SSO code:" });
+      }
 
       // Exchange for tokens (your implementation)
       const tokens = await exchangeCodeForTokens(code);
@@ -320,10 +335,21 @@ interface OAuthLoginCallbacks {
   onAuth(params: { url: string }): void;
 
   // Show device code (for device authorization flow)
-  onDeviceCode(params: { userCode: string; verificationUri: string }): void;
+  onDeviceCode(params: {
+    userCode: string;
+    verificationUri: string;
+    intervalSeconds?: number;
+    expiresInSeconds?: number;
+  }): void;
 
   // Prompt user for input (for manual token entry)
   onPrompt(params: { message: string }): Promise<string>;
+
+  // Show an interactive selector, e.g. to choose browser OAuth vs device code
+  onSelect(params: {
+    message: string;
+    options: { id: string; label: string }[];
+  }): Promise<string | undefined>;
 }
 ```
 
@@ -344,12 +370,12 @@ interface OAuthCredentials {
 For providers with non-standard APIs, implement `streamSimple`. Study the existing provider implementations before writing your own:
 
 **Reference implementations:**
-- [anthropic.ts](https://github.com/badlogic/pi-mono/blob/main/packages/ai/src/providers/anthropic.ts) - Anthropic Messages API
-- [mistral.ts](https://github.com/badlogic/pi-mono/blob/main/packages/ai/src/providers/mistral.ts) - Mistral Conversations API
-- [openai-completions.ts](https://github.com/badlogic/pi-mono/blob/main/packages/ai/src/providers/openai-completions.ts) - OpenAI Chat Completions
-- [openai-responses.ts](https://github.com/badlogic/pi-mono/blob/main/packages/ai/src/providers/openai-responses.ts) - OpenAI Responses API
-- [google.ts](https://github.com/badlogic/pi-mono/blob/main/packages/ai/src/providers/google.ts) - Google Generative AI
-- [amazon-bedrock.ts](https://github.com/badlogic/pi-mono/blob/main/packages/ai/src/providers/amazon-bedrock.ts) - AWS Bedrock
+- [anthropic.ts](https://github.com/earendil-works/pi-mono/blob/main/packages/ai/src/providers/anthropic.ts) - Anthropic Messages API
+- [mistral.ts](https://github.com/earendil-works/pi-mono/blob/main/packages/ai/src/providers/mistral.ts) - Mistral Conversations API
+- [openai-completions.ts](https://github.com/earendil-works/pi-mono/blob/main/packages/ai/src/providers/openai-completions.ts) - OpenAI Chat Completions
+- [openai-responses.ts](https://github.com/earendil-works/pi-mono/blob/main/packages/ai/src/providers/openai-responses.ts) - OpenAI Responses API
+- [google.ts](https://github.com/earendil-works/pi-mono/blob/main/packages/ai/src/providers/google.ts) - Google Generative AI
+- [amazon-bedrock.ts](https://github.com/earendil-works/pi-mono/blob/main/packages/ai/src/providers/amazon-bedrock.ts) - AWS Bedrock
 
 ### Stream Pattern
 
@@ -364,7 +390,7 @@ import {
   type SimpleStreamOptions,
   calculateCost,
   createAssistantMessageEventStream,
-} from "@mariozechner/pi-ai";
+} from "@earendil-works/pi-ai";
 
 function streamMyProvider(
   model: Model<any>,
@@ -505,6 +531,60 @@ output.usage.totalTokens = output.usage.input + output.usage.output +
 calculateCost(model, output.usage);
 ```
 
+### Context Overflow Errors
+
+When a request exceeds the model's context window, pi can recover automatically by compacting the conversation and retrying. This recovery only kicks in if pi recognizes the failure as an overflow.
+
+Detection runs on the finalized assistant message:
+
+- `stopReason === "error"`
+- `errorMessage` matches one of pi's known overflow patterns (see [`packages/ai/src/utils/overflow.ts`](https://github.com/earendil-works/pi-mono/blob/main/packages/ai/src/utils/overflow.ts))
+
+If your provider returns overflow errors with a message pi does not recognize, normalize the error from the same extension that registers the provider. Use a `message_end` handler to rewrite the assistant message so its `errorMessage` starts with a phrase pi recognizes. The generic fallback `context_length_exceeded` is the safest choice.
+
+```typescript
+const MY_PROVIDER_OVERFLOW_PATTERN = /your provider's overflow phrase/i;
+
+export default function (pi: ExtensionAPI) {
+  pi.registerProvider("my-provider", { /* ... */ });
+
+  pi.on("message_end", (event, ctx) => {
+    const message = event.message;
+    if (message.role !== "assistant") return;
+    if (message.stopReason !== "error") return;
+    if (
+      message.provider !== "my-provider" &&
+      ctx.model?.provider !== "my-provider"
+    )
+      return;
+
+    const errorMessage = message.errorMessage ?? "";
+    if (errorMessage.includes("context_length_exceeded")) return;
+    if (!MY_PROVIDER_OVERFLOW_PATTERN.test(errorMessage)) return;
+
+    return {
+      message: {
+        ...message,
+        errorMessage: `context_length_exceeded: ${errorMessage}`,
+      },
+    };
+  });
+}
+```
+
+`message_end` runs before pi tracks the assistant message for auto-compaction, so the rewritten `errorMessage` is what pi checks. With this in place, pi will:
+
+1. Detect the overflow from `errorMessage`.
+2. Drop the failed assistant message from live context.
+3. Run compaction.
+4. Retry the request once.
+
+Guard the rewrite carefully:
+
+- Scope it to your provider (`message.provider` and `ctx.model?.provider`) so unrelated errors from other providers are untouched.
+- Match a provider-specific pattern, not pi's generic overflow patterns. Rewriting rate-limit or throttling errors (`rate limit`, `too many requests`) would falsely trigger compaction instead of pi's normal retry-with-backoff path.
+- Skip when `errorMessage` already includes `context_length_exceeded` so the handler is idempotent.
+
 ### Registration
 
 Register your stream function:
@@ -521,7 +601,7 @@ pi.registerProvider("my-provider", {
 
 ## Testing Your Implementation
 
-Test your provider against the same test suites used by built-in providers. Copy and adapt these test files from [packages/ai/test/](https://github.com/badlogic/pi-mono/tree/main/packages/ai/test):
+Test your provider against the same test suites used by built-in providers. Copy and adapt these test files from [packages/ai/test/](https://github.com/earendil-works/pi-mono/tree/main/packages/ai/test):
 
 | Test | Purpose |
 |------|---------|
@@ -595,8 +675,14 @@ interface ProviderModelConfig {
   /** API type override for this specific model. */
   api?: Api;
 
+  /** API endpoint URL override for this specific model. */
+  baseUrl?: string;
+
   /** Whether the model supports extended thinking. */
   reasoning: boolean;
+
+  /** Maps pi thinking levels to provider/model-specific values; null marks a level unsupported. */
+  thinkingLevelMap?: Partial<Record<"off" | "minimal" | "low" | "medium" | "high" | "xhigh", string | null>>;
 
   /** Supported input types. */
   input: ("text" | "image")[];
@@ -618,23 +704,30 @@ interface ProviderModelConfig {
   /** Custom headers for this specific model. */
   headers?: Record<string, string>;
 
-  /** OpenAI compatibility settings for openai-completions API. */
+  /** Compatibility settings for the selected API. */
   compat?: {
+    // openai-completions
     supportsStore?: boolean;
     supportsDeveloperRole?: boolean;
     supportsReasoningEffort?: boolean;
-    reasoningEffortMap?: Partial<Record<"minimal" | "low" | "medium" | "high" | "xhigh", string>>;
     supportsUsageInStreaming?: boolean;
     maxTokensField?: "max_completion_tokens" | "max_tokens";
     requiresToolResultName?: boolean;
     requiresAssistantAfterToolResult?: boolean;
     requiresThinkingAsText?: boolean;
     requiresReasoningContentOnAssistantMessages?: boolean;
-    thinkingFormat?: "openai" | "deepseek" | "zai" | "qwen" | "qwen-chat-template";
+    thinkingFormat?: "openai" | "openrouter" | "deepseek" | "together" | "zai" | "qwen" | "qwen-chat-template";
     cacheControlFormat?: "anthropic";
+
+    // anthropic-messages
+    supportsEagerToolInputStreaming?: boolean;
+    supportsLongCacheRetention?: boolean;
+    sendSessionAffinityHeaders?: boolean;
+    supportsCacheControlOnTools?: boolean;
+    forceAdaptiveThinking?: boolean;
   };
 }
 ```
 
-`deepseek` sends `thinking: { type: "enabled" | "disabled" }` and `reasoning_effort` when enabled. `qwen` is for DashScope-style top-level `enable_thinking`. Use `qwen-chat-template` for local Qwen-compatible servers that read `chat_template_kwargs.enable_thinking`.
+`openrouter` sends `reasoning: { effort }`. `deepseek` sends `thinking: { type: "enabled" | "disabled" }` and `reasoning_effort` when enabled. `together` sends `reasoning: { enabled }` and also `reasoning_effort` when `supportsReasoningEffort` is enabled. `qwen` is for DashScope-style top-level `enable_thinking`. Use `qwen-chat-template` for local Qwen-compatible servers that read `chat_template_kwargs.enable_thinking`.
 `cacheControlFormat: "anthropic"` applies Anthropic-style `cache_control` markers to the system prompt, last tool definition, and last user/assistant text content.

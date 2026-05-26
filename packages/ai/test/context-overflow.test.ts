@@ -14,13 +14,13 @@
 import type { ChildProcess } from "child_process";
 import { execSync, spawn } from "child_process";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
-import { getModel } from "../src/models.js";
-import { complete } from "../src/stream.js";
-import type { AssistantMessage, Context, Model, Usage } from "../src/types.js";
-import { isContextOverflow } from "../src/utils/overflow.js";
-import { hasAzureOpenAICredentials } from "./azure-utils.js";
-import { hasBedrockCredentials } from "./bedrock-utils.js";
-import { resolveApiKey } from "./oauth.js";
+import { getModel } from "../src/models.ts";
+import { complete } from "../src/stream.ts";
+import type { AssistantMessage, Context, Model, Usage } from "../src/types.ts";
+import { isContextOverflow } from "../src/utils/overflow.ts";
+import { hasAzureOpenAICredentials } from "./azure-utils.ts";
+import { hasBedrockCredentials } from "./bedrock-utils.ts";
+import { resolveApiKey } from "./oauth.ts";
 
 // Resolve OAuth tokens at module level (async, runs before tests)
 const oauthTokens = await Promise.all([resolveApiKey("github-copilot"), resolveApiKey("openai-codex")]);
@@ -143,7 +143,7 @@ describe("Context overflow error handling", () => {
 		it.skipIf(!githubCopilotToken)(
 			"claude-sonnet-4 - should detect overflow via isContextOverflow",
 			async () => {
-				const model = getModel("github-copilot", "claude-sonnet-4");
+				const model = getModel("github-copilot", "claude-sonnet-4.6");
 				const result = await testContextOverflow(model, githubCopilotToken!);
 				logResult(result);
 
@@ -228,9 +228,9 @@ describe("Context overflow error handling", () => {
 
 	describe("OpenAI Codex (OAuth)", () => {
 		it.skipIf(!openaiCodexToken)(
-			"gpt-5.2-codex - should detect overflow via isContextOverflow",
+			"gpt-5.5 - should detect overflow via isContextOverflow",
 			async () => {
-				const model = getModel("openai-codex", "gpt-5.2-codex");
+				const model = getModel("openai-codex", "gpt-5.5");
 				const result = await testContextOverflow(model, openaiCodexToken!);
 				logResult(result);
 
@@ -326,6 +326,22 @@ describe("Context overflow error handling", () => {
 	});
 
 	// =============================================================================
+	// Together AI
+	// Uses OpenAI-compatible Chat Completions API
+	// =============================================================================
+
+	describe.skipIf(!process.env.TOGETHER_API_KEY)("Together AI", () => {
+		it("Kimi-K2.6 - should detect overflow via isContextOverflow", async () => {
+			const model = getModel("together", "moonshotai/Kimi-K2.6");
+			const result = await testContextOverflow(model, process.env.TOGETHER_API_KEY!);
+			logResult(result);
+
+			expect(result.stopReason).toBe("error");
+			expect(isContextOverflow(result.response, model.contextWindow)).toBe(true);
+		}, 120000);
+	});
+
+	// =============================================================================
 	// z.ai
 	// Special case: may return explicit overflow error text, may accept overflow silently,
 	// or may rate limit instead
@@ -385,6 +401,61 @@ describe("Context overflow error handling", () => {
 			logResult(result);
 
 			expect(result.stopReason).toBe("error");
+			expect(isContextOverflow(result.response, model.contextWindow)).toBe(true);
+		}, 120000);
+	});
+
+	// =============================================================================
+	// Xiaomi MiMo
+	// =============================================================================
+
+	describe.skipIf(!process.env.XIAOMI_API_KEY)("Xiaomi MiMo (API billing)", () => {
+		// Xiaomi silently truncates oversized input to fill the context window exactly,
+		// then returns finish_reason "length" with output=0 (no room left to generate).
+		// This is a detectable overflow signal but uses stopReason "length" rather than "error".
+		it("mimo-v2.5-pro - should detect overflow via isContextOverflow", async () => {
+			const model = getModel("xiaomi", "mimo-v2.5-pro");
+			const result = await testContextOverflow(model, process.env.XIAOMI_API_KEY!);
+			logResult(result);
+
+			expect(result.stopReason).toBe("length");
+			expect(result.usage.output).toBe(0);
+			expect(isContextOverflow(result.response, model.contextWindow)).toBe(true);
+		}, 120000);
+	});
+
+	describe.skipIf(!process.env.XIAOMI_TOKEN_PLAN_CN_API_KEY)("Xiaomi MiMo Token Plan (CN)", () => {
+		it("mimo-v2.5-pro - should detect overflow via isContextOverflow", async () => {
+			const model = getModel("xiaomi-token-plan-cn", "mimo-v2.5-pro");
+			const result = await testContextOverflow(model, process.env.XIAOMI_TOKEN_PLAN_CN_API_KEY!);
+			logResult(result);
+
+			expect(result.stopReason).toBe("length");
+			expect(result.usage.output).toBe(0);
+			expect(isContextOverflow(result.response, model.contextWindow)).toBe(true);
+		}, 120000);
+	});
+
+	describe.skipIf(!process.env.XIAOMI_TOKEN_PLAN_AMS_API_KEY)("Xiaomi MiMo Token Plan (AMS)", () => {
+		it("mimo-v2.5-pro - should detect overflow via isContextOverflow", async () => {
+			const model = getModel("xiaomi-token-plan-ams", "mimo-v2.5-pro");
+			const result = await testContextOverflow(model, process.env.XIAOMI_TOKEN_PLAN_AMS_API_KEY!);
+			logResult(result);
+
+			expect(result.stopReason).toBe("length");
+			expect(result.usage.output).toBe(0);
+			expect(isContextOverflow(result.response, model.contextWindow)).toBe(true);
+		}, 120000);
+	});
+
+	describe.skipIf(!process.env.XIAOMI_TOKEN_PLAN_SGP_API_KEY)("Xiaomi MiMo Token Plan (SGP)", () => {
+		it("mimo-v2.5-pro - should detect overflow via isContextOverflow", async () => {
+			const model = getModel("xiaomi-token-plan-sgp", "mimo-v2.5-pro");
+			const result = await testContextOverflow(model, process.env.XIAOMI_TOKEN_PLAN_SGP_API_KEY!);
+			logResult(result);
+
+			expect(result.stopReason).toBe("length");
+			expect(result.usage.output).toBe(0);
 			expect(isContextOverflow(result.response, model.contextWindow)).toBe(true);
 		}, 120000);
 	});

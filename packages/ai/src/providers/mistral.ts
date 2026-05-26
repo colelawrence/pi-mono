@@ -6,8 +6,8 @@ import type {
 	ContentChunk,
 	FunctionTool,
 } from "@mistralai/mistralai/models/components";
-import { getEnvApiKey } from "../env-api-keys.js";
-import { calculateCost } from "../models.js";
+import { getEnvApiKey } from "../env-api-keys.ts";
+import { calculateCost, clampThinkingLevel } from "../models.ts";
 import type {
 	AssistantMessage,
 	Context,
@@ -21,13 +21,13 @@ import type {
 	ThinkingContent,
 	Tool,
 	ToolCall,
-} from "../types.js";
-import { AssistantMessageEventStream } from "../utils/event-stream.js";
-import { shortHash } from "../utils/hash.js";
-import { parseStreamingJson } from "../utils/json-parse.js";
-import { sanitizeSurrogates } from "../utils/sanitize-unicode.js";
-import { buildBaseOptions, clampReasoning } from "./simple-options.js";
-import { transformMessages } from "./transform-messages.js";
+} from "../types.ts";
+import { AssistantMessageEventStream } from "../utils/event-stream.ts";
+import { shortHash } from "../utils/hash.ts";
+import { parseStreamingJson } from "../utils/json-parse.ts";
+import { sanitizeSurrogates } from "../utils/sanitize-unicode.ts";
+import { buildBaseOptions } from "./simple-options.ts";
+import { transformMessages } from "./transform-messages.ts";
 
 const MISTRAL_TOOL_CALL_ID_LENGTH = 9;
 const MAX_MISTRAL_ERROR_BODY_CHARS = 4000;
@@ -119,13 +119,15 @@ export const streamSimpleMistral: StreamFunction<"mistral-conversations", Simple
 	}
 
 	const base = buildBaseOptions(model, options, apiKey);
-	const reasoning = clampReasoning(options?.reasoning);
+	const clampedReasoning = options?.reasoning ? clampThinkingLevel(model, options.reasoning) : undefined;
+	const reasoning = clampedReasoning === "off" ? undefined : clampedReasoning;
 	const shouldUseReasoning = model.reasoning && reasoning !== undefined;
 
 	return streamMistral(model, context, {
 		...base,
 		promptMode: shouldUseReasoning && usesPromptModeReasoning(model) ? "reasoning" : undefined,
-		reasoningEffort: shouldUseReasoning && usesReasoningEffort(model) ? mapReasoningEffort(reasoning) : undefined,
+		reasoningEffort:
+			shouldUseReasoning && usesReasoningEffort(model) ? mapReasoningEffort(model, reasoning) : undefined,
 	} satisfies MistralOptions);
 };
 
@@ -594,8 +596,11 @@ function usesPromptModeReasoning(model: Model<"mistral-conversations">): boolean
 	return model.reasoning && !usesReasoningEffort(model);
 }
 
-function mapReasoningEffort(_level: Exclude<SimpleStreamOptions["reasoning"], undefined>): MistralReasoningEffort {
-	return "high";
+function mapReasoningEffort(
+	model: Model<"mistral-conversations">,
+	level: Exclude<SimpleStreamOptions["reasoning"], undefined>,
+): MistralReasoningEffort {
+	return (model.thinkingLevelMap?.[level] ?? "high") as MistralReasoningEffort;
 }
 
 function mapToolChoice(

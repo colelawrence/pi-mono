@@ -10,16 +10,16 @@
 import { existsSync, mkdirSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { Agent } from "@mariozechner/pi-agent-core";
-import { type AssistantMessage, type AssistantMessageEvent, EventStream, getModel } from "@mariozechner/pi-ai";
+import { Agent } from "@earendil-works/pi-agent-core";
+import { type AssistantMessage, type AssistantMessageEvent, EventStream, getModel } from "@earendil-works/pi-ai";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { AgentSession } from "../src/core/agent-session.js";
-import { AuthStorage } from "../src/core/auth-storage.js";
-import { ModelRegistry } from "../src/core/model-registry.js";
-import { SessionManager } from "../src/core/session-manager.js";
-import { createSessionRuntime } from "../src/core/session-runtime.js";
-import { SettingsManager } from "../src/core/settings-manager.js";
-import { createTestExtensionsResult, createTestResourceLoader } from "./utilities.js";
+import { AgentSession } from "../src/core/agent-session.ts";
+import { AuthStorage } from "../src/core/auth-storage.ts";
+import { ModelRegistry } from "../src/core/model-registry.ts";
+import { SessionManager } from "../src/core/session-manager.ts";
+import { createSessionRuntime } from "../src/core/session-runtime.ts";
+import { SettingsManager } from "../src/core/settings-manager.ts";
+import { createTestExtensionsResult, createTestResourceLoader } from "./utilities.ts";
 
 class MockAssistantStream extends EventStream<AssistantMessageEvent, AssistantMessage> {
 	constructor() {

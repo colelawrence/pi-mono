@@ -1,9 +1,10 @@
-import type { Transport } from "@mariozechner/pi-ai";
+import type { Transport } from "@earendil-works/pi-ai";
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from "fs";
-import { homedir } from "os";
 import { dirname, join } from "path";
 import lockfile from "proper-lockfile";
-import { CONFIG_DIR_NAME, getAgentDir } from "../config.js";
+import { CONFIG_DIR_NAME, getAgentDir } from "../config.ts";
+import { normalizePath, resolvePath } from "../utils/paths.ts";
+import { DEFAULT_HTTP_IDLE_TIMEOUT_MS, parseHttpIdleTimeoutMs } from "./http-dispatcher.ts";
 
 export interface CompactionSettings {
 	enabled?: boolean; // default: true
@@ -78,7 +79,7 @@ export interface Settings {
 	defaultProvider?: string;
 	defaultModel?: string;
 	defaultThinkingLevel?: "off" | "minimal" | "low" | "medium" | "high" | "xhigh";
-	transport?: TransportSetting; // default: "sse"
+	transport?: TransportSetting; // default: "auto"
 	steeringMode?: "all" | "one-at-a-time";
 	followUpMode?: "all" | "one-at-a-time";
 	theme?: string;
@@ -111,6 +112,7 @@ export interface Settings {
 	markdown?: MarkdownSettings;
 	warnings?: WarningSettings;
 	sessionDir?: string; // Custom session storage directory (same format as --session-dir CLI flag)
+	httpIdleTimeoutMs?: number; // HTTP header/body idle timeout in milliseconds; 0 disables it
 }
 
 /** Deep merge settings: project/overrides take precedence, nested objects merge recursively */
@@ -160,8 +162,10 @@ export class FileSettingsStorage implements SettingsStorage {
 	private projectSettingsPath: string;
 
 	constructor(cwd: string, agentDir: string) {
-		this.globalSettingsPath = join(agentDir, "settings.json");
-		this.projectSettingsPath = join(cwd, CONFIG_DIR_NAME, "settings.json");
+		const resolvedCwd = resolvePath(cwd);
+		const resolvedAgentDir = resolvePath(agentDir);
+		this.globalSettingsPath = join(resolvedAgentDir, "settings.json");
+		this.projectSettingsPath = join(resolvedCwd, CONFIG_DIR_NAME, "settings.json");
 	}
 
 	private acquireLockSyncWithRetry(path: string): () => void {
@@ -576,16 +580,7 @@ export class SettingsManager {
 
 	getSessionDir(): string | undefined {
 		const sessionDir = this.settings.sessionDir;
-		if (!sessionDir) {
-			return sessionDir;
-		}
-		if (sessionDir === "~") {
-			return homedir();
-		}
-		if (sessionDir.startsWith("~/")) {
-			return join(homedir(), sessionDir.slice(2));
-		}
-		return sessionDir;
+		return sessionDir ? normalizePath(sessionDir) : sessionDir;
 	}
 
 	getDefaultProvider(): string | undefined {
@@ -657,7 +652,7 @@ export class SettingsManager {
 	}
 
 	getTransport(): TransportSetting {
-		return this.settings.transport ?? "sse";
+		return this.settings.transport ?? "auto";
 	}
 
 	setTransport(transport: TransportSetting): void {
@@ -725,6 +720,27 @@ export class SettingsManager {
 			maxRetries: this.settings.retry?.maxRetries ?? 3,
 			baseDelayMs: this.settings.retry?.baseDelayMs ?? 2000,
 		};
+	}
+
+	getHttpIdleTimeoutMs(): number {
+		const value = this.settings.httpIdleTimeoutMs;
+		const timeoutMs = parseHttpIdleTimeoutMs(value);
+		if (timeoutMs !== undefined) {
+			return timeoutMs;
+		}
+		if (value !== undefined) {
+			throw new Error(`Invalid httpIdleTimeoutMs setting: ${String(value)}`);
+		}
+		return DEFAULT_HTTP_IDLE_TIMEOUT_MS;
+	}
+
+	setHttpIdleTimeoutMs(timeoutMs: number): void {
+		if (!Number.isFinite(timeoutMs) || timeoutMs < 0) {
+			throw new Error(`Invalid httpIdleTimeoutMs setting: ${String(timeoutMs)}`);
+		}
+		this.globalSettings.httpIdleTimeoutMs = Math.floor(timeoutMs);
+		this.markModified("httpIdleTimeoutMs");
+		this.save();
 	}
 
 	getProviderRetrySettings(): { timeoutMs?: number; maxRetries?: number; maxRetryDelayMs: number } {

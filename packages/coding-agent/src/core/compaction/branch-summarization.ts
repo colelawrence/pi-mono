@@ -5,17 +5,17 @@
  * a summary of the branch being left so context isn't lost.
  */
 
-import type { AgentMessage } from "@mariozechner/pi-agent-core";
-import type { Model } from "@mariozechner/pi-ai";
-import { completeSimple } from "@mariozechner/pi-ai";
+import type { AgentMessage } from "@earendil-works/pi-agent-core";
+import type { Model } from "@earendil-works/pi-ai";
+import { completeSimple } from "@earendil-works/pi-ai";
 import {
 	convertToLlm,
 	createBranchSummaryMessage,
 	createCompactionSummaryMessage,
 	createCustomMessage,
-} from "../messages.js";
-import type { ReadonlySessionManager, SessionEntry } from "../session-manager.js";
-import { estimateTokens } from "./compaction.js";
+} from "../messages.ts";
+import type { ReadonlySessionManager, SessionEntry } from "../session-manager.ts";
+import { estimateTokens } from "./compaction.ts";
 import {
 	computeFileLists,
 	createFileOps,
@@ -24,7 +24,7 @@ import {
 	formatFileOperations,
 	SUMMARIZATION_SYSTEM_PROMPT,
 	serializeConversation,
-} from "./utils.js";
+} from "./utils.ts";
 
 // ============================================================================
 // Types
@@ -44,7 +44,7 @@ export interface BranchSummaryDetails {
 	modifiedFiles: string[];
 }
 
-export type { FileOperations } from "./utils.js";
+export type { FileOperations } from "./utils.ts";
 
 export interface BranchPreparation {
 	/** Messages extracted for summarization, in chronological order */

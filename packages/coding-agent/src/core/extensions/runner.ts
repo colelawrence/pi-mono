@@ -2,15 +2,15 @@
  * Extension runner - executes extensions and manages their lifecycle.
  */
 
-import type { AgentMessage } from "@mariozechner/pi-agent-core";
-import type { ImageContent, Model } from "@mariozechner/pi-ai";
-import type { KeyId } from "@mariozechner/pi-tui";
-import { type Theme, theme } from "../../modes/interactive/theme/theme.js";
-import type { ResourceDiagnostic } from "../diagnostics.js";
-import type { KeybindingsConfig } from "../keybindings.js";
-import type { ModelRegistry } from "../model-registry.js";
-import type { SessionManager } from "../session-manager.js";
-import type { BuildSystemPromptOptions } from "../system-prompt.js";
+import type { AgentMessage } from "@earendil-works/pi-agent-core";
+import type { ImageContent, Model } from "@earendil-works/pi-ai";
+import type { KeyId } from "@earendil-works/pi-tui";
+import { type Theme, theme } from "../../modes/interactive/theme/theme.ts";
+import type { ResourceDiagnostic } from "../diagnostics.ts";
+import type { KeybindingsConfig } from "../keybindings.ts";
+import type { ModelRegistry } from "../model-registry.ts";
+import type { SessionManager } from "../session-manager.ts";
+import type { BuildSystemPromptOptions } from "../system-prompt.ts";
 import type {
 	BeforeAgentStartEvent,
 	BeforeAgentStartEventResult,
@@ -55,7 +55,7 @@ import type {
 	ToolResultEventResult,
 	UserBashEvent,
 	UserBashEventResult,
-} from "./types.js";
+} from "./types.ts";
 
 // Symbol used by epi (Effect-native pi fork) to expose the session's Effect Runtime on ExtensionContext.
 // See types.ts for the full usage contract.

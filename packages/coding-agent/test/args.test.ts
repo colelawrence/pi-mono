@@ -1,5 +1,5 @@
 import { describe, expect, test } from "vitest";
-import { parseArgs } from "../src/cli/args.js";
+import { parseArgs } from "../src/cli/args.ts";
 
 describe("parseArgs", () => {
 	describe("--version flag", () => {
@@ -42,6 +42,21 @@ describe("parseArgs", () => {
 		test("parses -p shorthand", () => {
 			const result = parseArgs(["-p"]);
 			expect(result.print).toBe(true);
+		});
+
+		test("parses prompt after -p even when it starts with YAML frontmatter", () => {
+			const prompt = "---\ntitle: hello\n---\nSay hi.";
+			const result = parseArgs(["-p", prompt]);
+			expect(result.print).toBe(true);
+			expect(result.messages).toEqual([prompt]);
+			expect(result.unknownFlags.size).toBe(0);
+		});
+
+		test("does not consume options after -p as prompts", () => {
+			const result = parseArgs(["-p", "--provider", "openai", "Say hi."]);
+			expect(result.print).toBe(true);
+			expect(result.provider).toBe("openai");
+			expect(result.messages).toEqual(["Say hi."]);
 		});
 	});
 

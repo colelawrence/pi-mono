@@ -7,7 +7,7 @@ import * as crypto from "node:crypto";
 import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
-import type { AgentMessage } from "@mariozechner/pi-agent-core";
+import type { AgentMessage } from "@earendil-works/pi-agent-core";
 import {
 	type AssistantMessage,
 	getProviders,
@@ -15,7 +15,8 @@ import {
 	type Message,
 	type Model,
 	type OAuthProviderId,
-} from "@mariozechner/pi-ai";
+	type OAuthSelectPrompt,
+} from "@earendil-works/pi-ai";
 import type {
 	AutocompleteItem,
 	AutocompleteProvider,
@@ -26,12 +27,14 @@ import type {
 	OverlayHandle,
 	OverlayOptions,
 	SlashCommand,
-} from "@mariozechner/pi-tui";
+} from "@earendil-works/pi-tui";
 import {
 	CombinedAutocompleteProvider,
 	type Component,
 	Container,
 	fuzzyFilter,
+	getCapabilities,
+	hyperlink,
 	Loader,
 	type LoaderIndicatorOptions,
 	Markdown,
@@ -43,7 +46,7 @@ import {
 	TruncatedText,
 	TUI,
 	visibleWidth,
-} from "@mariozechner/pi-tui";
+} from "@earendil-works/pi-tui";
 import { spawn, spawnSync } from "child_process";
 import {
 	APP_NAME,
@@ -54,9 +57,9 @@ import {
 	getDocsPath,
 	getShareViewerUrl,
 	VERSION,
-} from "../../config.js";
-import { type AgentSession, type AgentSessionEvent, parseSkillBlock } from "../../core/agent-session.js";
-import { type AgentSessionRuntime, SessionImportFileNotFoundError } from "../../core/agent-session-runtime.js";
+} from "../../config.ts";
+import { type AgentSession, type AgentSessionEvent, parseSkillBlock } from "../../core/agent-session.ts";
+import { type AgentSessionRuntime, SessionImportFileNotFoundError } from "../../core/agent-session-runtime.ts";
 import type {
 	AutocompleteProviderFactory,
 	EditorFactory,
@@ -66,56 +69,58 @@ import type {
 	ExtensionUIContext,
 	ExtensionUIDialogOptions,
 	ExtensionWidgetOptions,
-} from "../../core/extensions/index.js";
-import { FooterDataProvider, type ReadonlyFooterDataProvider } from "../../core/footer-data-provider.js";
-import { type AppKeybinding, KeybindingsManager } from "../../core/keybindings.js";
-import { createCompactionSummaryMessage } from "../../core/messages.js";
-import { defaultModelPerProvider, findExactModelReferenceMatch, resolveModelScope } from "../../core/model-resolver.js";
-import { DefaultPackageManager } from "../../core/package-manager.js";
-import { BUILT_IN_PROVIDER_DISPLAY_NAMES } from "../../core/provider-display-names.js";
-import type { ResourceDiagnostic } from "../../core/resource-loader.js";
-import { formatMissingSessionCwdPrompt, MissingSessionCwdError } from "../../core/session-cwd.js";
-import { type SessionContext, SessionManager } from "../../core/session-manager.js";
-import { BUILTIN_SLASH_COMMANDS } from "../../core/slash-commands.js";
-import type { SourceInfo } from "../../core/source-info.js";
-import { isInstallTelemetryEnabled } from "../../core/telemetry.js";
-import type { TruncationResult } from "../../core/tools/truncate.js";
-import { getChangelogPath, getNewEntries, parseChangelog } from "../../utils/changelog.js";
-import { copyToClipboard } from "../../utils/clipboard.js";
-import { extensionForImageMimeType, readClipboardImage } from "../../utils/clipboard-image.js";
-import { parseGitUrl } from "../../utils/git.js";
-import { getPiUserAgent } from "../../utils/pi-user-agent.js";
-import { killTrackedDetachedChildren } from "../../utils/shell.js";
-import { ensureTool } from "../../utils/tools-manager.js";
-import { checkForNewPiVersion } from "../../utils/version-check.js";
-import { ArminComponent } from "./components/armin.js";
-import { AssistantMessageComponent } from "./components/assistant-message.js";
-import { BashExecutionComponent } from "./components/bash-execution.js";
-import { BorderedLoader } from "./components/bordered-loader.js";
-import { BranchSummaryMessageComponent } from "./components/branch-summary-message.js";
-import { CompactionSummaryMessageComponent } from "./components/compaction-summary-message.js";
-import { CountdownTimer } from "./components/countdown-timer.js";
-import { CustomEditor } from "./components/custom-editor.js";
-import { CustomMessageComponent } from "./components/custom-message.js";
-import { DaxnutsComponent } from "./components/daxnuts.js";
-import { DynamicBorder } from "./components/dynamic-border.js";
-import { EarendilAnnouncementComponent } from "./components/earendil-announcement.js";
-import { ExtensionEditorComponent } from "./components/extension-editor.js";
-import { ExtensionInputComponent } from "./components/extension-input.js";
-import { ExtensionSelectorComponent } from "./components/extension-selector.js";
-import { FooterComponent } from "./components/footer.js";
-import { keyHint, keyText, rawKeyHint } from "./components/keybinding-hints.js";
-import { LoginDialogComponent } from "./components/login-dialog.js";
-import { ModelSelectorComponent } from "./components/model-selector.js";
-import { type AuthSelectorProvider, OAuthSelectorComponent } from "./components/oauth-selector.js";
-import { ScopedModelsSelectorComponent } from "./components/scoped-models-selector.js";
-import { SessionSelectorComponent } from "./components/session-selector.js";
-import { SettingsSelectorComponent } from "./components/settings-selector.js";
-import { SkillInvocationMessageComponent } from "./components/skill-invocation-message.js";
-import { ToolExecutionComponent } from "./components/tool-execution.js";
-import { TreeSelectorComponent } from "./components/tree-selector.js";
-import { UserMessageComponent } from "./components/user-message.js";
-import { UserMessageSelectorComponent } from "./components/user-message-selector.js";
+} from "../../core/extensions/index.ts";
+import { FooterDataProvider, type ReadonlyFooterDataProvider } from "../../core/footer-data-provider.ts";
+import { configureHttpDispatcher, formatHttpIdleTimeoutMs } from "../../core/http-dispatcher.ts";
+import { type AppKeybinding, KeybindingsManager } from "../../core/keybindings.ts";
+import { createCompactionSummaryMessage } from "../../core/messages.ts";
+import { defaultModelPerProvider, findExactModelReferenceMatch, resolveModelScope } from "../../core/model-resolver.ts";
+import { DefaultPackageManager } from "../../core/package-manager.ts";
+import { BUILT_IN_PROVIDER_DISPLAY_NAMES } from "../../core/provider-display-names.ts";
+import type { ResourceDiagnostic } from "../../core/resource-loader.ts";
+import { formatMissingSessionCwdPrompt, MissingSessionCwdError } from "../../core/session-cwd.ts";
+import { type SessionContext, SessionManager } from "../../core/session-manager.ts";
+import { BUILTIN_SLASH_COMMANDS } from "../../core/slash-commands.ts";
+import type { SourceInfo } from "../../core/source-info.ts";
+import { isInstallTelemetryEnabled } from "../../core/telemetry.ts";
+import type { TruncationResult } from "../../core/tools/truncate.ts";
+import { getChangelogPath, getNewEntries, parseChangelog } from "../../utils/changelog.ts";
+import { copyToClipboard } from "../../utils/clipboard.ts";
+import { extensionForImageMimeType, readClipboardImage } from "../../utils/clipboard-image.ts";
+import { parseGitUrl } from "../../utils/git.ts";
+import { getCwdRelativePath } from "../../utils/paths.ts";
+import { getPiUserAgent } from "../../utils/pi-user-agent.ts";
+import { killTrackedDetachedChildren } from "../../utils/shell.ts";
+import { ensureTool } from "../../utils/tools-manager.ts";
+import { checkForNewPiVersion, type LatestPiRelease } from "../../utils/version-check.ts";
+import { ArminComponent } from "./components/armin.ts";
+import { AssistantMessageComponent } from "./components/assistant-message.ts";
+import { BashExecutionComponent } from "./components/bash-execution.ts";
+import { BorderedLoader } from "./components/bordered-loader.ts";
+import { BranchSummaryMessageComponent } from "./components/branch-summary-message.ts";
+import { CompactionSummaryMessageComponent } from "./components/compaction-summary-message.ts";
+import { CountdownTimer } from "./components/countdown-timer.ts";
+import { CustomEditor } from "./components/custom-editor.ts";
+import { CustomMessageComponent } from "./components/custom-message.ts";
+import { DaxnutsComponent } from "./components/daxnuts.ts";
+import { DynamicBorder } from "./components/dynamic-border.ts";
+import { EarendilAnnouncementComponent } from "./components/earendil-announcement.ts";
+import { ExtensionEditorComponent } from "./components/extension-editor.ts";
+import { ExtensionInputComponent } from "./components/extension-input.ts";
+import { ExtensionSelectorComponent } from "./components/extension-selector.ts";
+import { FooterComponent } from "./components/footer.ts";
+import { formatKeyText, keyDisplayText, keyHint, keyText, rawKeyHint } from "./components/keybinding-hints.ts";
+import { LoginDialogComponent } from "./components/login-dialog.ts";
+import { ModelSelectorComponent } from "./components/model-selector.ts";
+import { type AuthSelectorProvider, OAuthSelectorComponent } from "./components/oauth-selector.ts";
+import { ScopedModelsSelectorComponent } from "./components/scoped-models-selector.ts";
+import { SessionSelectorComponent } from "./components/session-selector.ts";
+import { SettingsSelectorComponent } from "./components/settings-selector.ts";
+import { SkillInvocationMessageComponent } from "./components/skill-invocation-message.ts";
+import { ToolExecutionComponent } from "./components/tool-execution.ts";
+import { TreeSelectorComponent } from "./components/tree-selector.ts";
+import { UserMessageComponent } from "./components/user-message.ts";
+import { UserMessageSelectorComponent } from "./components/user-message-selector.ts";
 import {
 	getAvailableThemes,
 	getAvailableThemesWithPaths,
@@ -131,7 +136,7 @@ import {
 	Theme,
 	type ThemeColor,
 	theme,
-} from "./theme/theme.js";
+} from "./theme/theme.ts";
 
 /** Interface for components that can be expanded/collapsed */
 interface Expandable {
@@ -143,14 +148,19 @@ function isExpandable(obj: unknown): obj is Expandable {
 }
 
 class ExpandableText extends Text implements Expandable {
+	private readonly getCollapsedText: () => string;
+	private readonly getExpandedText: () => string;
+
 	constructor(
-		private readonly getCollapsedText: () => string,
-		private readonly getExpandedText: () => string,
+		getCollapsedText: () => string,
+		getExpandedText: () => string,
 		expanded = false,
 		paddingX = 0,
 		paddingY = 0,
 	) {
 		super(expanded ? getExpandedText() : getCollapsedText(), paddingX, paddingY);
+		this.getCollapsedText = getCollapsedText;
+		this.getExpandedText = getExpandedText;
 	}
 
 	setExpanded(expanded: boolean): void {
@@ -162,6 +172,16 @@ type CompactionQueuedMessage = {
 	text: string;
 	mode: "steer" | "followUp";
 };
+
+const DEAD_TERMINAL_ERROR_CODES = new Set(["EIO", "EPIPE", "ENOTCONN"]);
+
+function isDeadTerminalError(error: unknown): boolean {
+	if (!error || typeof error !== "object" || !("code" in error)) {
+		return false;
+	}
+	const code = (error as NodeJS.ErrnoException).code;
+	return code !== undefined && DEAD_TERMINAL_ERROR_CODES.has(code);
+}
 
 const ANTHROPIC_SUBSCRIPTION_AUTH_WARNING =
 	"Anthropic subscription auth is active. Third-party harness usage draws from extra usage and is billed per token, not your Claude plan limits. Manage extra usage at https://claude.ai/settings/usage.";
@@ -323,6 +343,8 @@ export class InteractiveMode {
 	// Custom header from extension (undefined = use built-in header)
 	private customHeader: (Component & { dispose?(): void }) | undefined = undefined;
 
+	private options: InteractiveModeOptions;
+
 	// Convenience accessors
 	private get session(): AgentSession {
 		return this.runtimeHost.session;
@@ -337,11 +359,9 @@ export class InteractiveMode {
 		return this.session.settingsManager;
 	}
 
-	constructor(
-		runtimeHost: AgentSessionRuntime,
-		private options: InteractiveModeOptions = {},
-	) {
+	constructor(runtimeHost: AgentSessionRuntime, options: InteractiveModeOptions = {}) {
 		this.runtimeHost = runtimeHost;
+		this.options = options;
 		this.runtimeHost.setBeforeSessionInvalidate(() => {
 			this.resetExtensionUI();
 		});
@@ -567,6 +587,21 @@ export class InteractiveMode {
 		const [fdPath] = await Promise.all([ensureTool("fd"), ensureTool("rg")]);
 		this.fdPath = fdPath;
 
+		if (this.session.scopedModels.length > 0 && (this.options.verbose || !this.settingsManager.getQuietStartup())) {
+			const modelList = this.session.scopedModels
+				.map((sm) => {
+					const thinkingStr = sm.thinkingLevel ? `:${sm.thinkingLevel}` : "";
+					return `${sm.model.id}${thinkingStr}`;
+				})
+				.join(", ");
+			const cycleKeys = this.keybindings.getKeys("app.model.cycleForward");
+			const cycleHint =
+				cycleKeys.length > 0
+					? theme.fg("muted", ` (${formatKeyText(cycleKeys.join("/"), { capitalize: true })} to cycle)`)
+					: "";
+			console.log(theme.fg("dim", `Model scope: ${modelList}${cycleHint}`));
+		}
+
 		// Add header container as first child
 		this.ui.addChild(this.headerContainer);
 
@@ -692,9 +727,9 @@ export class InteractiveMode {
 		await this.init();
 
 		// Start version check asynchronously
-		checkForNewPiVersion(this.version).then((newVersion) => {
-			if (newVersion) {
-				this.showNewVersionNotification(newVersion);
+		checkForNewPiVersion(this.version).then((newRelease) => {
+			if (newRelease) {
+				this.showNewVersionNotification(newRelease);
 			}
 		});
 
@@ -910,15 +945,9 @@ export class InteractiveMode {
 	private formatContextPath(p: string): string {
 		const cwd = path.resolve(this.sessionManager.getCwd());
 		const absolutePath = path.isAbsolute(p) ? path.resolve(p) : path.resolve(cwd, p);
-		const relativePath = path.relative(cwd, absolutePath);
-		const isInsideCwd =
-			relativePath === "" ||
-			(!relativePath.startsWith("..") &&
-				!relativePath.startsWith(`..${path.sep}`) &&
-				!path.isAbsolute(relativePath));
-
-		if (isInsideCwd) {
-			return relativePath || ".";
+		const relativePath = getCwdRelativePath(absolutePath, cwd);
+		if (relativePath !== undefined) {
+			return relativePath;
 		}
 
 		return this.formatDisplayPath(absolutePath);
@@ -1465,6 +1494,9 @@ export class InteractiveMode {
 		const uiContext = this.createExtensionUIContext();
 		await this.session.bindExtensions({
 			uiContext,
+			abortHandler: () => {
+				this.restoreQueuedMessagesToEditor({ abort: true });
+			},
 			commandContextActions: {
 				waitForIdle: () => this.session.agent.waitForIdle(),
 				newSession: async (options) => {
@@ -1545,6 +1577,7 @@ export class InteractiveMode {
 	}
 
 	private applyRuntimeSettings(): void {
+		configureHttpDispatcher(this.settingsManager.getHttpIdleTimeoutMs());
 		this.footer.setSession(this.session);
 		this.footer.setAutoCompactEnabled(this.session.autoCompactionEnabled);
 		this.footerDataProvider.setCwd(this.sessionManager.getCwd());
@@ -1615,7 +1648,9 @@ export class InteractiveMode {
 			model: this.session.model,
 			isIdle: () => !this.session.isStreaming,
 			signal: this.session.agent.signal,
-			abort: () => this.session.abort(),
+			abort: () => {
+				this.restoreQueuedMessagesToEditor({ abort: true });
+			},
 			hasPendingMessages: () => this.session.pendingMessageCount > 0,
 			shutdown: () => {
 				this.shutdownRequested = true;
@@ -2027,7 +2062,7 @@ export class InteractiveMode {
 					this.hideExtensionSelector();
 					resolve(undefined);
 				},
-				{ tui: this.ui, timeout: opts?.timeout },
+				{ tui: this.ui, timeout: opts?.timeout, onToggleToolsExpanded: () => this.toggleToolOutputExpansion() },
 			);
 
 			this.editorContainer.clear();
@@ -2634,6 +2669,7 @@ export class InteractiveMode {
 
 		switch (event.type) {
 			case "agent_start":
+				this.pendingTools.clear();
 				if (this.settingsManager.getShowTerminalProgress()) {
 					this.ui.terminal.setProgress(true);
 				}
@@ -3106,6 +3142,7 @@ export class InteractiveMode {
 		options: { updateFooter?: boolean; populateHistory?: boolean } = {},
 	): void {
 		this.pendingTools.clear();
+		const renderedPendingTools = new Map<string, ToolExecutionComponent>();
 
 		if (options.updateFooter) {
 			this.footer.invalidate();
@@ -3147,16 +3184,16 @@ export class InteractiveMode {
 							}
 							component.updateResult({ content: [{ type: "text", text: errorMessage }], isError: true });
 						} else {
-							this.pendingTools.set(content.id, component);
+							renderedPendingTools.set(content.id, component);
 						}
 					}
 				}
 			} else if (message.role === "toolResult") {
 				// Match tool results to pending tool components
-				const component = this.pendingTools.get(message.toolCallId);
+				const component = renderedPendingTools.get(message.toolCallId);
 				if (component) {
 					component.updateResult(message);
-					this.pendingTools.delete(message.toolCallId);
+					renderedPendingTools.delete(message.toolCallId);
 				}
 			} else {
 				// All other messages use standard rendering
@@ -3164,7 +3201,9 @@ export class InteractiveMode {
 			}
 		}
 
-		this.pendingTools.clear();
+		for (const [toolCallId, component] of renderedPendingTools) {
+			this.pendingTools.set(toolCallId, component);
+		}
 		this.ui.requestRender();
 	}
 
@@ -3253,6 +3292,45 @@ export class InteractiveMode {
 		process.exit(0);
 	}
 
+	private emergencyTerminalExit(): never {
+		this.isShuttingDown = true;
+		this.unregisterSignalHandlers();
+		killTrackedDetachedChildren();
+		// The terminal is gone. Do not run normal shutdown because TUI and
+		// extension cleanup can write restore sequences and re-trigger EIO.
+		process.exit(129);
+	}
+
+	/**
+	 * Last-resort handler for uncaught exceptions. The TUI puts stdin into raw
+	 * mode and hides the cursor; without this handler, an uncaught throw from
+	 * anywhere (e.g. an extension's async `ChildProcess.on("exit")` callback)
+	 * tears down the process while leaving the terminal in raw mode with no
+	 * cursor, requiring `stty sane && reset` to recover.
+	 *
+	 * Unlike emergencyTerminalExit, the terminal is still alive here, so we
+	 * call ui.stop() to restore cooked mode, the cursor, and disable bracketed
+	 * paste / Kitty / modifyOtherKeys sequences.
+	 */
+	private uncaughtCrash(error: Error): never {
+		if (this.isShuttingDown) {
+			process.exit(1);
+		}
+		this.isShuttingDown = true;
+		try {
+			this.unregisterSignalHandlers();
+		} catch {}
+		try {
+			killTrackedDetachedChildren();
+		} catch {}
+		try {
+			this.ui.stop();
+		} catch {}
+		console.error("pi exiting due to uncaughtException:");
+		console.error(error);
+		process.exit(1);
+	}
+
 	/**
 	 * Check if shutdown was requested and perform shutdown if so.
 	 */
@@ -3271,12 +3349,33 @@ export class InteractiveMode {
 
 		for (const signal of signals) {
 			const handler = () => {
+				if (signal === "SIGHUP") {
+					this.emergencyTerminalExit();
+				}
 				killTrackedDetachedChildren();
 				void this.shutdown();
 			};
-			process.on(signal, handler);
+			process.prependListener(signal, handler);
 			this.signalCleanupHandlers.push(() => process.off(signal, handler));
 		}
+
+		const terminalErrorHandler = (error: Error) => {
+			if (isDeadTerminalError(error)) {
+				this.emergencyTerminalExit();
+			}
+			throw error;
+		};
+		process.stdout.on("error", terminalErrorHandler);
+		process.stderr.on("error", terminalErrorHandler);
+		this.signalCleanupHandlers.push(() => process.stdout.off("error", terminalErrorHandler));
+		this.signalCleanupHandlers.push(() => process.stderr.off("error", terminalErrorHandler));
+
+		// Restore the terminal before the process dies on any uncaught throw.
+		// Without this, an unhandled exception from extension code (or anywhere
+		// in pi) leaves the terminal in raw mode with no cursor.
+		const uncaughtExceptionHandler = (error: Error) => this.uncaughtCrash(error);
+		process.prependListener("uncaughtException", uncaughtExceptionHandler);
+		this.signalCleanupHandlers.push(() => process.off("uncaughtException", uncaughtExceptionHandler));
 	}
 
 	private unregisterSignalHandlers(): void {
@@ -3436,7 +3535,7 @@ export class InteractiveMode {
 		this.showStatus(`Hidden custom messages: ${this.showHiddenCustomMessages ? "visible" : "hidden"}`);
 	}
 
-	private openExternalEditor(): void {
+	private async openExternalEditor(): Promise<void> {
 		// Determine editor (respect $VISUAL, then $EDITOR)
 		const editorCmd = process.env.VISUAL || process.env.EDITOR;
 		if (!editorCmd) {
@@ -3457,14 +3556,22 @@ export class InteractiveMode {
 			// Split by space to support editor arguments (e.g., "code --wait")
 			const [editor, ...editorArgs] = editorCmd.split(" ");
 
-			// Spawn editor synchronously with inherited stdio for interactive editing
-			const result = spawnSync(editor, [...editorArgs, tmpFile], {
-				stdio: "inherit",
-				shell: process.platform === "win32",
+			process.stdout.write(`Launching external editor: ${editorCmd}\nPi will resume when the editor exits.\n`);
+
+			// Do not use spawnSync here. On Windows, synchronous child_process calls can keep
+			// Node/libuv's console input read active after ui.stop() pauses stdin, racing
+			// vim/nvim for the console input buffer until Ctrl+C cancels the pending read.
+			const status = await new Promise<number | null>((resolve) => {
+				const child = spawn(editor, [...editorArgs, tmpFile], {
+					stdio: "inherit",
+					shell: process.platform === "win32",
+				});
+				child.on("error", () => resolve(null));
+				child.on("close", (code) => resolve(code));
 			});
 
 			// On successful exit (status 0), replace editor content
-			if (result.status === 0) {
+			if (status === 0) {
 				const newContent = fs.readFileSync(tmpFile, "utf-8").replace(/\n$/, "");
 				this.editor.setText(newContent);
 			}
@@ -3496,6 +3603,7 @@ export class InteractiveMode {
 	showError(errorMessage: string): void {
 		this.chatContainer.addChild(new Spacer(1));
 		this.chatContainer.addChild(new Text(theme.fg("error", `Error: ${errorMessage}`), 1, 0));
+		this.chatContainer.addChild(new Spacer(1));
 		this.ui.requestRender();
 	}
 
@@ -3505,24 +3613,31 @@ export class InteractiveMode {
 		this.ui.requestRender();
 	}
 
-	showNewVersionNotification(newVersion: string): void {
+	showNewVersionNotification(release: LatestPiRelease): void {
 		const action = theme.fg("accent", `${APP_NAME} update`);
-		const updateInstruction = theme.fg("muted", `New version ${newVersion} is available. Run `) + action;
-		const changelogUrl = theme.fg(
-			"accent",
-			"https://github.com/badlogic/pi-mono/blob/main/packages/coding-agent/CHANGELOG.md",
-		);
-		const changelogLine = theme.fg("muted", "Changelog: ") + changelogUrl;
+		const updateInstruction = theme.fg("muted", `New version ${release.version} is available. Run `) + action;
+		const changelogUrl = "https://pi.dev/changelog";
+		const changelogLink = getCapabilities().hyperlinks
+			? hyperlink(theme.fg("accent", "open changelog"), changelogUrl)
+			: theme.fg("accent", changelogUrl);
+		const changelogLine = theme.fg("muted", "Changelog: ") + changelogLink;
+		const note = release.note?.trim();
 
 		this.chatContainer.addChild(new Spacer(1));
 		this.chatContainer.addChild(new DynamicBorder((text) => theme.fg("warning", text)));
 		this.chatContainer.addChild(
-			new Text(
-				`${theme.bold(theme.fg("warning", "Update Available"))}\n${updateInstruction}\n${changelogLine}`,
-				1,
-				0,
-			),
+			new Text(`${theme.bold(theme.fg("warning", "Update Available"))}\n${updateInstruction}`, 1, 0),
 		);
+		if (note) {
+			this.chatContainer.addChild(new Spacer(1));
+			this.chatContainer.addChild(
+				new Markdown(note, 1, 0, this.getMarkdownThemeWithSettings(), {
+					color: (text) => theme.fg("muted", text),
+				}),
+			);
+			this.chatContainer.addChild(new Spacer(1));
+		}
+		this.chatContainer.addChild(new Text(changelogLine, 1, 0));
 		this.chatContainer.addChild(new DynamicBorder((text) => theme.fg("warning", text)));
 		this.ui.requestRender();
 	}
@@ -3759,6 +3874,7 @@ export class InteractiveMode {
 					steeringMode: this.session.steeringMode,
 					followUpMode: this.session.followUpMode,
 					transport: this.settingsManager.getTransport(),
+					httpIdleTimeoutMs: this.settingsManager.getHttpIdleTimeoutMs(),
 					thinkingLevel: this.session.thinkingLevel,
 					availableThinkingLevels: this.session.getAvailableThinkingLevels(),
 					currentTheme: this.settingsManager.getTheme() || "dark",
@@ -3817,6 +3933,11 @@ export class InteractiveMode {
 					onTransportChange: (transport) => {
 						this.settingsManager.setTransport(transport);
 						this.session.agent.transport = transport;
+					},
+					onHttpIdleTimeoutMsChange: (timeoutMs) => {
+						this.settingsManager.setHttpIdleTimeoutMs(timeoutMs);
+						configureHttpDispatcher(timeoutMs);
+						this.showStatus(`HTTP idle timeout: ${formatHttpIdleTimeoutMs(timeoutMs)}`);
 					},
 					onThinkingLevelChange: (level) => {
 						this.session.setThinkingLevel(level);
@@ -4638,6 +4759,34 @@ export class InteractiveMode {
 		}
 	}
 
+	private showOAuthLoginSelect(dialog: LoginDialogComponent, prompt: OAuthSelectPrompt): Promise<string | undefined> {
+		return new Promise((resolve) => {
+			const restoreDialog = () => {
+				this.editorContainer.clear();
+				this.editorContainer.addChild(dialog);
+				this.ui.setFocus(dialog);
+				this.ui.requestRender();
+			};
+			const labels = prompt.options.map((option) => option.label);
+			const selector = new ExtensionSelectorComponent(
+				prompt.message,
+				labels,
+				(optionLabel) => {
+					restoreDialog();
+					resolve(prompt.options.find((option) => option.label === optionLabel)?.id);
+				},
+				() => {
+					restoreDialog();
+					resolve(undefined);
+				},
+			);
+			this.editorContainer.clear();
+			this.editorContainer.addChild(selector);
+			this.ui.setFocus(selector);
+			this.ui.requestRender();
+		});
+	}
+
 	private async showLoginDialog(providerId: string, providerName: string): Promise<void> {
 		const providerInfo = this.session.modelRegistry.authStorage
 			.getOAuthProviders()
@@ -4700,11 +4849,13 @@ export class InteractiveMode {
 									manualCodeReject = undefined;
 								}
 							});
-					} else if (providerId === "github-copilot") {
-						// GitHub Copilot polls after onAuth
-						dialog.showWaiting("Waiting for browser authentication...");
 					}
 					// For Anthropic: onPrompt is called immediately after
+				},
+
+				onDeviceCode: (info) => {
+					dialog.showDeviceCode(info);
+					dialog.showWaiting("Waiting for authentication...");
 				},
 
 				onPrompt: async (prompt: { message: string; placeholder?: string }) => {
@@ -4714,6 +4865,8 @@ export class InteractiveMode {
 				onProgress: (message: string) => {
 					dialog.showProgress(message);
 				},
+
+				onSelect: (prompt: OAuthSelectPrompt) => this.showOAuthLoginSelect(dialog, prompt),
 
 				onManualCodeInput: () => manualCodePromise,
 
@@ -4774,6 +4927,7 @@ export class InteractiveMode {
 
 		try {
 			await this.session.reload();
+			configureHttpDispatcher(this.settingsManager.getHttpIdleTimeoutMs());
 			this.keybindings.reload();
 			const activeHeader = this.customHeader ?? this.builtInHeader;
 			if (isExpandable(activeHeader)) {
@@ -5100,32 +5254,17 @@ export class InteractiveMode {
 	}
 
 	/**
-	 * Capitalize keybinding for display (e.g., "ctrl+c" -> "Ctrl+C").
-	 */
-	private capitalizeKey(key: string): string {
-		return key
-			.split("/")
-			.map((k) =>
-				k
-					.split("+")
-					.map((part) => part.charAt(0).toUpperCase() + part.slice(1))
-					.join("+"),
-			)
-			.join("/");
-	}
-
-	/**
 	 * Get capitalized display string for an app keybinding action.
 	 */
 	private getAppKeyDisplay(action: AppKeybinding): string {
-		return this.capitalizeKey(keyText(action));
+		return keyDisplayText(action);
 	}
 
 	/**
 	 * Get capitalized display string for an editor keybinding action.
 	 */
 	private getEditorKeyDisplay(action: Keybinding): string {
-		return this.capitalizeKey(keyText(action));
+		return keyDisplayText(action);
 	}
 
 	private handleHotkeysCommand(): void {
@@ -5229,7 +5368,7 @@ export class InteractiveMode {
 `;
 			for (const [key, shortcut] of shortcuts) {
 				const description = shortcut.description ?? shortcut.extensionPath;
-				const keyDisplay = key.replace(/\b\w/g, (c) => c.toUpperCase());
+				const keyDisplay = formatKeyText(key, { capitalize: true });
 				hotkeys += `| \`${keyDisplay}\` | ${description} |\n`;
 			}
 		}

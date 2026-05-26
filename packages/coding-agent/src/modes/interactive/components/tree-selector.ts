@@ -8,11 +8,11 @@ import {
 	Text,
 	TruncatedText,
 	truncateToWidth,
-} from "@mariozechner/pi-tui";
-import type { SessionTreeNode } from "../../../core/session-manager.js";
-import { theme } from "../theme/theme.js";
-import { DynamicBorder } from "./dynamic-border.js";
-import { keyHint, keyText } from "./keybinding-hints.js";
+} from "@earendil-works/pi-tui";
+import type { SessionTreeNode } from "../../../core/session-manager.ts";
+import { theme } from "../theme/theme.ts";
+import { DynamicBorder } from "./dynamic-border.ts";
+import { keyHint, keyText } from "./keybinding-hints.ts";
 
 /** Gutter info: position (displayIndent where connector was) and whether to show │ */
 interface GutterInfo {
@@ -1056,7 +1056,11 @@ class TreeList implements Component {
 
 /** Component that displays the current search query */
 class SearchLine implements Component {
-	constructor(private treeList: TreeList) {}
+	private treeList: TreeList;
+
+	constructor(treeList: TreeList) {
+		this.treeList = treeList;
+	}
 
 	invalidate(): void {}
 
@@ -1185,11 +1189,12 @@ export class TreeSelectorComponent extends Container implements Focusable {
 			keyText("app.tree.filter.all"),
 		].join("/");
 		const cycleKeys = `${keyText("app.tree.filter.cycleForward")}/${keyText("app.tree.filter.cycleBackward")}`;
+		const branchKeys = `${keyText("app.tree.foldOrUp")}/${keyText("app.tree.unfoldOrDown")}`;
 		this.addChild(
 			new TruncatedText(
 				theme.fg(
 					"muted",
-					`  ↑/↓: move. ←/→: page. ^←/^→ or Alt+←/Alt+→: fold/branch. ${keyText("app.tree.editLabel")}: label. ${filterKeys}: filters (${cycleKeys} cycle). ${keyText("app.tree.toggleLabelTimestamp")}: label time`,
+					`  ↑/↓: move. ←/→: page. ${branchKeys}: fold/branch. ${keyText("app.tree.editLabel")}: label. ${filterKeys}: filters (${cycleKeys} cycle). ${keyText("app.tree.toggleLabelTimestamp")}: label time`,
 				),
 				0,
 				0,

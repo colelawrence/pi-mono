@@ -13,11 +13,11 @@
  * If any of these tests fail after a refactor, the refactor has broken security.
  */
 
-import type { AgentTool } from "@mariozechner/pi-agent-core";
+import type { AgentTool } from "@earendil-works/pi-agent-core";
 import { Type } from "@sinclair/typebox";
 import { describe, expect, it } from "vitest";
-import type { ExtensionRunner, ToolCallEventResult } from "../src/core/extensions/index.js";
-import { wrapToolWithExtensions } from "../src/core/extensions/wrapper.js";
+import type { ExtensionRunner, ToolCallEventResult } from "../src/core/extensions/index.ts";
+import { wrapToolWithExtensions } from "../src/core/extensions/wrapper.ts";
 
 // Minimal mock for ExtensionRunner — only the methods wrapToolWithExtensions uses
 function createMockRunner(

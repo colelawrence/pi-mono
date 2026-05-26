@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { type BashOperations, createBashToolDefinition } from "../src/core/tools/bash.js";
+import { type BashOperations, createBashToolDefinition } from "../src/core/tools/bash.ts";
 
 describe("bash tool telemetry details", () => {
 	it("attaches execution telemetry to successful results", async () => {

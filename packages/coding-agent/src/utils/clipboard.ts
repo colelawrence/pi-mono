@@ -1,7 +1,7 @@
 import { execSync, spawn } from "child_process";
 import { platform } from "os";
-import { isWaylandSession } from "./clipboard-image.js";
-import { clipboard } from "./clipboard-native.js";
+import { isWaylandSession } from "./clipboard-image.ts";
+import { clipboard } from "./clipboard-native.ts";
 
 type NativeClipboardExecOptions = {
 	input: string;
@@ -35,11 +35,20 @@ function emitOsc52(text: string): boolean {
 export async function copyToClipboard(text: string): Promise<void> {
 	let copied = false;
 
+	const p = platform();
+
 	// Prefer direct clipboard writes. Emitting OSC 52 first can make terminals
 	// write the same native clipboard concurrently with the addon, and very large
 	// OSC 52 payloads can desynchronize terminal rendering.
+	//
+	// On Linux, skip the native addon. The underlying `clipboard-rs` crate is
+	// X11-only and does not retain selection ownership after `set_text`
+	// resolves, so on Wayland-only compositors (Hyprland, Niri, ...) and even
+	// some X11 sessions the call resolves successfully without populating the
+	// clipboard. The platform tools below (wl-copy, xclip, xsel) properly
+	// daemonize and keep ownership.
 	try {
-		if (clipboard) {
+		if (clipboard && p !== "linux") {
 			await clipboard.setText(text);
 			copied = true;
 		}
@@ -52,7 +61,6 @@ export async function copyToClipboard(text: string): Promise<void> {
 		return;
 	}
 
-	const p = platform();
 	const options: NativeClipboardExecOptions = { input: text, timeout: 5000, stdio: ["pipe", "ignore", "ignore"] };
 
 	if (!copied) {

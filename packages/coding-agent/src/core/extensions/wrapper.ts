@@ -5,10 +5,10 @@
  * Tool call and tool result interception is handled by AgentSession via agent-core hooks.
  */
 
-import type { AgentTool } from "@mariozechner/pi-agent-core";
-import { wrapToolDefinition, wrapToolDefinitions } from "../tools/tool-definition-wrapper.js";
-import type { ExtensionRunner } from "./runner.js";
-import type { RegisteredTool } from "./types.js";
+import type { AgentTool } from "@earendil-works/pi-agent-core";
+import { wrapToolDefinition, wrapToolDefinitions } from "../tools/tool-definition-wrapper.ts";
+import type { ExtensionRunner } from "./runner.ts";
+import type { RegisteredTool } from "./types.ts";
 
 /**
  * Wrap a RegisteredTool into an AgentTool.

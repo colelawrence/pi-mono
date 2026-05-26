@@ -1,14 +1,14 @@
 import { describe, expect, it } from "vitest";
-import { getModel } from "../src/models.js";
-import { stream } from "../src/stream.js";
-import type { Api, Context, Model, StreamOptions } from "../src/types.js";
+import { getModel } from "../src/models.ts";
+import { stream } from "../src/stream.ts";
+import type { Api, Context, Model, StreamOptions } from "../src/types.ts";
 
 type StreamOptionsWithExtras = StreamOptions & Record<string, unknown>;
 
-import { hasAzureOpenAICredentials, resolveAzureDeploymentName } from "./azure-utils.js";
-import { hasBedrockCredentials } from "./bedrock-utils.js";
-import { hasCloudflareAiGatewayCredentials, hasCloudflareWorkersAICredentials } from "./cloudflare-utils.js";
-import { resolveApiKey } from "./oauth.js";
+import { hasAzureOpenAICredentials, resolveAzureDeploymentName } from "./azure-utils.ts";
+import { hasBedrockCredentials } from "./bedrock-utils.ts";
+import { hasCloudflareAiGatewayCredentials, hasCloudflareWorkersAICredentials } from "./cloudflare-utils.ts";
+import { resolveApiKey } from "./oauth.ts";
 
 // Resolve OAuth tokens at module level (async, runs before tests)
 const oauthTokens = await Promise.all([
@@ -180,6 +180,14 @@ describe("Token Statistics on Abort", () => {
 		});
 	});
 
+	describe.skipIf(!process.env.TOGETHER_API_KEY)("Together AI Provider", () => {
+		const llm = getModel("together", "moonshotai/Kimi-K2.6");
+
+		it("should include token stats when aborted mid-stream", { retry: 3, timeout: 30000 }, async () => {
+			await testTokensOnAbort(llm);
+		});
+	});
+
 	describe.skipIf(!process.env.ZAI_API_KEY)("zAI Provider", () => {
 		const llm = getModel("zai", "glm-4.5-air");
 
@@ -220,6 +228,49 @@ describe("Token Statistics on Abort", () => {
 		});
 	});
 
+	describe.skipIf(!process.env.XIAOMI_API_KEY)("Xiaomi MiMo (API billing) Provider", () => {
+		const llm = getModel("xiaomi", "mimo-v2.5-pro");
+
+		// FIXME(xiaomi): Xiaomi's Anthropic-compatible stream does not populate
+		// usage in the message_start event the way Anthropic does — usage only
+		// arrives at message_stop. Aborting mid-stream therefore loses input/output
+		// token counts. Non-streaming usage works (see total-tokens.test.ts).
+		// Re-enable once upstream sends usage in message_start.
+		it.skip("should include token stats when aborted mid-stream", { retry: 3, timeout: 30000 }, async () => {
+			await testTokensOnAbort(llm);
+		});
+	});
+
+	describe.skipIf(!process.env.XIAOMI_TOKEN_PLAN_CN_API_KEY)("Xiaomi MiMo Token Plan (CN) Provider", () => {
+		const llm = getModel("xiaomi-token-plan-cn", "mimo-v2.5-pro");
+
+		// FIXME(xiaomi): see the API-billing block above — same upstream streaming
+		// usage limitation applies to Token Plan endpoints.
+		it.skip("should include token stats when aborted mid-stream", { retry: 3, timeout: 30000 }, async () => {
+			await testTokensOnAbort(llm);
+		});
+	});
+
+	describe.skipIf(!process.env.XIAOMI_TOKEN_PLAN_AMS_API_KEY)("Xiaomi MiMo Token Plan (AMS) Provider", () => {
+		const llm = getModel("xiaomi-token-plan-ams", "mimo-v2.5-pro");
+
+		// FIXME(xiaomi): see the API-billing block above — same upstream streaming
+		// usage limitation applies to Token Plan endpoints.
+		it.skip("should include token stats when aborted mid-stream", { retry: 3, timeout: 30000 }, async () => {
+			await testTokensOnAbort(llm);
+		});
+	});
+
+	describe.skipIf(!process.env.XIAOMI_TOKEN_PLAN_SGP_API_KEY)("Xiaomi MiMo Token Plan (SGP) Provider", () => {
+		const llm = getModel("xiaomi-token-plan-sgp", "mimo-v2.5-pro");
+
+		// FIXME(xiaomi): see the API-billing block above — same upstream streaming
+		// usage limitation applies to Token Plan endpoints.
+		it.skip("should include token stats when aborted mid-stream", { retry: 3, timeout: 30000 }, async () => {
+			await testTokensOnAbort(llm);
+		});
+	});
+
 	// =========================================================================
 	// OAuth-based providers (credentials from ~/.pi/agent/oauth.json)
 	// =========================================================================
@@ -250,7 +301,7 @@ describe("Token Statistics on Abort", () => {
 			"claude-sonnet-4 - should include token stats when aborted mid-stream",
 			{ retry: 3, timeout: 30000 },
 			async () => {
-				const llm = getModel("github-copilot", "claude-sonnet-4");
+				const llm = getModel("github-copilot", "claude-sonnet-4.6");
 				await testTokensOnAbort(llm, { apiKey: githubCopilotToken });
 			},
 		);
@@ -258,10 +309,10 @@ describe("Token Statistics on Abort", () => {
 
 	describe("OpenAI Codex Provider", () => {
 		it.skipIf(!openaiCodexToken)(
-			"gpt-5.2-codex - should include token stats when aborted mid-stream",
+			"gpt-5.5 - should include token stats when aborted mid-stream",
 			{ retry: 3, timeout: 30000 },
 			async () => {
-				const llm = getModel("openai-codex", "gpt-5.2-codex");
+				const llm = getModel("openai-codex", "gpt-5.5");
 				await testTokensOnAbort(llm, { apiKey: openaiCodexToken });
 			},
 		);

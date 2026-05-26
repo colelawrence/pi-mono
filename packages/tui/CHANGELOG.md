@@ -6,6 +6,11 @@
 
 - Added optional `@` path mention aliases to `CombinedAutocompleteProvider`, allowing consumers to complete named resources to file paths.
 
+### Fixed
+
+- Fixed `Shift+Enter` in Apple Terminal by detecting local macOS modifier state when Terminal.app sends plain Return.
+- Fixed Windows Terminal capability detection to enable OSC 8 hyperlinks, preserving clickable long URLs across wrapped lines ([#4923](https://github.com/earendil-works/pi/issues/4923)).
+
 ## [0.71.1] - 2026-05-01
 
 ## [0.71.0] - 2026-04-30

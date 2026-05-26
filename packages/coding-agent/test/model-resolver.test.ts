@@ -1,11 +1,11 @@
-import type { Model } from "@mariozechner/pi-ai";
+import type { Model } from "@earendil-works/pi-ai";
 import { describe, expect, test } from "vitest";
 import {
 	defaultModelPerProvider,
 	findInitialModel,
 	parseModelPattern,
 	resolveCliModel,
-} from "../src/core/model-resolver.js";
+} from "../src/core/model-resolver.ts";
 
 // Mock models for testing
 const mockModels: Model<"anthropic-messages">[] = [

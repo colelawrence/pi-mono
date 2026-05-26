@@ -17,7 +17,7 @@
  *   6. Continuation scheduling replaces setTimeout(() => agent.continue().catch({}), N)
  */
 
-import type { Agent, AgentEvent, AgentMessage } from "@mariozechner/pi-agent-core";
+import type { Agent, AgentEvent, AgentMessage } from "@earendil-works/pi-agent-core";
 
 // ============================================================================
 // Phase — replaces boolean _isInPromptDrainLoop + isStreaming checks

@@ -1,8 +1,8 @@
-import { type AssistantMessage, EventStream, type Message, type Model, type UserMessage } from "@mariozechner/pi-ai";
+import { type AssistantMessage, EventStream, type Message, type Model, type UserMessage } from "@earendil-works/pi-ai";
 import { Type } from "@sinclair/typebox";
 import { describe, expect, it } from "vitest";
-import { agentLoop } from "../src/agent-loop.js";
-import type { AgentEvent, AgentLoopConfig, AgentMessage, AgentTool } from "../src/types.js";
+import { agentLoop } from "../src/agent-loop.ts";
+import type { AgentEvent, AgentLoopConfig, AgentMessage, AgentTool } from "../src/types.ts";
 
 class MockAssistantStream extends EventStream<any, AssistantMessage> {
 	constructor() {

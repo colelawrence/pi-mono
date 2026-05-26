@@ -1,6 +1,6 @@
-import type { AgentMessage } from "@mariozechner/pi-agent-core";
-import type { AssistantMessage, Usage } from "@mariozechner/pi-ai";
-import { getModel } from "@mariozechner/pi-ai";
+import type { AgentMessage } from "@earendil-works/pi-agent-core";
+import type { AssistantMessage, Usage } from "@earendil-works/pi-ai";
+import { getModel } from "@earendil-works/pi-ai";
 import { readFileSync } from "fs";
 import { join } from "path";
 import { beforeEach, describe, expect, it } from "vitest";
@@ -14,7 +14,7 @@ import {
 	getLastAssistantUsage,
 	prepareCompaction,
 	shouldCompact,
-} from "../src/core/compaction/index.js";
+} from "../src/core/compaction/index.ts";
 import {
 	buildSessionContext,
 	type CompactionEntry,
@@ -24,7 +24,7 @@ import {
 	type SessionEntry,
 	type SessionMessageEntry,
 	type ThinkingLevelChangeEntry,
-} from "../src/core/session-manager.js";
+} from "../src/core/session-manager.ts";
 
 // ============================================================================
 // Test fixtures

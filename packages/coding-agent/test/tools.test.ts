@@ -1,10 +1,11 @@
+import { applyPatch } from "diff";
 import { chmodSync, existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "fs";
 import { tmpdir } from "os";
 import { join } from "path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { executeBashWithOperations } from "../src/core/bash-executor.js";
-import { createBashTool, createLocalBashOperations } from "../src/core/tools/bash.js";
-import { computeEditsDiff } from "../src/core/tools/edit-diff.js";
+import { executeBashWithOperations } from "../src/core/bash-executor.ts";
+import { type BashOperations, createBashTool, createLocalBashOperations } from "../src/core/tools/bash.ts";
+import { computeEditsDiff } from "../src/core/tools/edit-diff.ts";
 import {
 	createEditTool,
 	createFindTool,
@@ -12,8 +13,8 @@ import {
 	createLsTool,
 	createReadTool,
 	createWriteTool,
-} from "../src/index.js";
-import * as shellModule from "../src/utils/shell.js";
+} from "../src/index.ts";
+import * as shellModule from "../src/utils/shell.ts";
 
 const readTool = createReadTool(process.cwd());
 const writeTool = createWriteTool(process.cwd());
@@ -239,6 +240,12 @@ describe("Coding Agent Tools", () => {
 			expect(result.details.diff).toBeDefined();
 			expect(typeof result.details.diff).toBe("string");
 			expect(result.details.diff).toContain("testing");
+			expect(result.details.patch).toContain("--- ");
+			expect(result.details.patch).toContain("+++ ");
+			expect(result.details.patch).toContain("@@");
+			expect(result.details.patch).toContain("-Hello, world!");
+			expect(result.details.patch).toContain("+Hello, testing!");
+			expect(applyPatch(originalContent, result.details.patch)).toBe("Hello, testing!");
 		});
 
 		it("should fail if text not found", async () => {
@@ -449,6 +456,42 @@ describe("Coding Agent Tools", () => {
 			);
 		});
 
+		it("should include full output path for truncated timeout and abort errors", async () => {
+			for (const testCase of [
+				{ error: "timeout:5", expected: "Command timed out after 5 seconds" },
+				{ error: "aborted", expected: "Command aborted" },
+			]) {
+				const operations: BashOperations = {
+					exec: async (_command, _cwd, { onData }) => {
+						for (let i = 1; i <= 3000; i++) {
+							onData(Buffer.from(`${i}\n`, "utf-8"));
+						}
+						throw new Error(testCase.error);
+					},
+				};
+				const bash = createBashTool(testDir, { operations });
+
+				let error: unknown;
+				try {
+					await bash.execute(`test-call-${testCase.error}`, { command: "chatty-fail" });
+				} catch (err) {
+					error = err;
+				}
+
+				expect(error).toBeInstanceOf(Error);
+				const message = (error as Error).message;
+				expect(message).toContain(testCase.expected);
+				expect(message).toMatch(/\[Showing lines \d+-\d+ of \d+\. Full output: /);
+				expect(message).not.toContain("Full output: undefined");
+				const fullOutputPath = message.match(/Full output: ([^\]\n]+)/)?.[1];
+				expect(fullOutputPath).toBeDefined();
+				expect(existsSync(fullOutputPath!)).toBe(true);
+				const fullOutput = readFileSync(fullOutputPath!, "utf-8");
+				expect(fullOutput).toContain("1\n2\n3");
+				expect(fullOutput).toContain("2998\n2999\n3000");
+			}
+		});
+
 		it("should throw error when cwd does not exist", async () => {
 			const nonexistentCwd = "/this/directory/definitely/does/not/exist/12345";
 
@@ -515,6 +558,64 @@ describe("Coding Agent Tools", () => {
 
 			const result = await bashWithoutPrefix.execute("test-prefix-3", { command: "echo no-prefix" });
 			expect(getTextOutput(result).trim()).toBe("no-prefix");
+		});
+
+		it("should coalesce streaming updates for chatty output", async () => {
+			const operations: BashOperations = {
+				exec: async (_command, _cwd, { onData }) => {
+					for (let i = 0; i < 5000; i++) {
+						onData(Buffer.from(`line ${i}\n`, "utf-8"));
+					}
+					return { exitCode: 0 };
+				},
+			};
+			const updates: Array<{ content: Array<{ type: string; text?: string }>; details?: unknown }> = [];
+			const bash = createBashTool(testDir, { operations });
+
+			const result = await bash.execute("test-call-chatty-updates", { command: "chatty" }, undefined, (update) =>
+				updates.push(update),
+			);
+
+			expect(updates.length).toBeLessThan(25);
+			expect(getTextOutput(result)).toContain("line 4999");
+		});
+
+		it("should not count a trailing newline as an extra truncated bash output line", async () => {
+			const operations: BashOperations = {
+				exec: async (_command, _cwd, { onData }) => {
+					for (let i = 1; i <= 4000; i++) {
+						onData(Buffer.from(`line-${String(i).padStart(4, "0")}\n`, "utf-8"));
+					}
+					return { exitCode: 0 };
+				},
+			};
+			const bash = createBashTool(testDir, { operations });
+
+			const result = await bash.execute("test-call-trailing-newline-line-count", { command: "many-lines" });
+			const output = getTextOutput(result);
+
+			expect(result.details?.truncation?.totalLines).toBe(4000);
+			expect(result.details?.truncation?.outputLines).toBe(2000);
+			expect(output).toContain("line-2001");
+			expect(output).toContain("line-4000");
+			expect(output).toMatch(/\[Showing lines 2001-4000 of 4000\. Full output: /);
+			expect(output).not.toContain("4001");
+		});
+
+		it("should decode UTF-8 characters split across output chunks", async () => {
+			const euro = Buffer.from("€\n", "utf-8");
+			const operations: BashOperations = {
+				exec: async (_command, _cwd, { onData }) => {
+					onData(euro.subarray(0, 1));
+					onData(euro.subarray(1));
+					return { exitCode: 0 };
+				},
+			};
+			const bash = createBashTool(testDir, { operations });
+
+			const result = await bash.execute("test-call-split-utf8", { command: "split-utf8" });
+
+			expect(getTextOutput(result).trim()).toBe("€");
 		});
 
 		it("should expose local bash operations for extension reuse", async () => {
