@@ -1688,6 +1688,7 @@ export class AgentSession {
 		await this.abort();
 		this._compactionAbortController = new AbortController();
 		this._emit({ type: "compaction_start", reason: "manual" });
+		let shouldResumeQueuedMessages = false;
 
 		try {
 			if (!this.model) {
@@ -1795,6 +1796,7 @@ export class AgentSession {
 				aborted: false,
 				willRetry: false,
 			});
+			shouldResumeQueuedMessages = this.agent.hasQueuedMessages();
 			return compactionResult;
 		} catch (error) {
 			const message = error instanceof Error ? error.message : String(error);
@@ -1811,6 +1813,9 @@ export class AgentSession {
 		} finally {
 			this._compactionAbortController = undefined;
 			this._reconnectToAgent();
+			if (shouldResumeQueuedMessages) {
+				this._runtime.scheduleContinuation(this.agent, 100);
+			}
 		}
 	}
 

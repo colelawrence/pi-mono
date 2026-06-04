@@ -122,6 +122,21 @@ describe("AgentSession auto-compaction queue resume", () => {
 		expect(continueSpy).not.toHaveBeenCalled();
 	});
 
+	it("should resume queued follow-up messages after manual compaction", async () => {
+		await session.followUp("queued after compact");
+
+		expect(session.getFollowUpMessages()).toEqual(["queued after compact"]);
+		expect(session.agent.hasQueuedMessages()).toBe(true);
+
+		const continueSpy = vi.spyOn(session.agent, "continue").mockResolvedValue();
+
+		await session.compact("test manual compaction");
+		expect(session.getFollowUpMessages()).toEqual(["queued after compact"]);
+		await vi.advanceTimersByTimeAsync(100);
+
+		expect(continueSpy).toHaveBeenCalledTimes(1);
+	});
+
 	it("should not compact repeatedly after overflow recovery already attempted", async () => {
 		const model = session.model!;
 		const overflowMessage: AssistantMessage = {
